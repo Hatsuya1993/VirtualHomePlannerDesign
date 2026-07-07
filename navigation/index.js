@@ -5,6 +5,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { DesignsScreen } from "../screens/DesignsScreen";
 import { CreateScreen } from "../screens/CreateScreen";
 import { AccountScreen } from "../screens/AccountScreen";
+import { FloorPlanScreen } from "../screens/FloorPlanScreen";
+import { DrawWallsScreen } from "../screens/DrawWallsScreen";
+import { PlanPreviewScreen } from "../screens/PlanPreviewScreen";
 import { colors, shadow } from "../utils/theme";
 
 const Stack = createNativeStackNavigator();
@@ -58,6 +61,21 @@ const RootNavigator = () => {
             }}
         >
             <Stack.Screen name="HomeScreen" component={HomeTabs} />
+            <Stack.Screen
+                name="FloorPlan"
+                component={FloorPlanScreen}
+                options={{ animation: "slide_from_right" }}
+            />
+            <Stack.Screen
+                name="DrawWalls"
+                component={DrawWallsScreen}
+                options={{ animation: "slide_from_right" }}
+            />
+            <Stack.Screen
+                name="PlanPreview"
+                component={PlanPreviewScreen}
+                options={{ animation: "fade" }}
+            />
         </Stack.Navigator>
     );
 };

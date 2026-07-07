@@ -40,9 +40,13 @@ const CREATE_ITEMS = [
     },
 ];
 
-export const CreateScreen = () => {
+export const CreateScreen = ({ navigation }) => {
     const handleStart = (key) => {
-        // TODO: navigate to the matching create flow
+        if (key === "3d-design") {
+            navigation.navigate("FloorPlan");
+            return;
+        }
+        // TODO: navigate to the remaining create flows
         console.log("start", key);
     };
 

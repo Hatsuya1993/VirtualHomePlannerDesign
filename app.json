@@ -19,6 +19,16 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to access your photos to upload a floor plan.",
+          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera to capture a floor plan."
+        }
+      ]
+    ]
   }
 }

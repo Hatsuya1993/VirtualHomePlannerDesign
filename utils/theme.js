@@ -28,6 +28,10 @@ export const colors = {
 
     dark: "#111827",
     border: "#E5E7EB",
+
+    // Floor-plan drawing
+    line: "#3F4756",
+    lineFaint: "#C7CBD4",
 };
 
 export const radius = {
