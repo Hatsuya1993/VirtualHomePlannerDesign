@@ -338,7 +338,7 @@ export const FloorPlanScreen = ({ navigation }) => {
             {/* Header */}
             <View style={styles.header}>
                 <AnimatedPressable
-                    onPress={() => navigation.goBack()}
+                    onPress={() => navigation.navigate("HomeScreen")}
                     scaleTo={0.9}
                     style={styles.backButton}
                     hitSlop={10}

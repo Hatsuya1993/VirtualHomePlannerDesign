@@ -1,14 +1,22 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PanResponder, StyleSheet, Text, View } from "react-native";
 import Svg, { Circle, G, Image as SvgImage, Line } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
+import { GapWarningBanner } from "../../components/GapWarningBanner";
+import {
+    chainRoom,
+    collectEndpoints,
+    findCornerGroup,
+    snapPoint,
+} from "../../utils/roomGeometry";
 import { colors, radius } from "../../utils/theme";
 
 const GRID = 26; // grid cell size in points (screen space)
 const MIN_WALL = 12; // ignore accidental taps shorter than this (screen space)
 const PICK_RADIUS = 28; // touch radius for grabbing an endpoint (screen space)
+const SNAP_RADIUS = 26; // touch radius for snapping a drawn/dragged point onto an existing endpoint (screen space)
 const WALL_WIDTH = 8; // content-space stroke width
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 6;
@@ -35,6 +43,21 @@ export const DrawWallsScreen = ({ navigation, route }) => {
     const [current, setCurrent] = useState(null); // in-progress line (content coords)
     const [transform, setTransform] = useState({ s: 1, tx: 0, ty: 0 });
     const [canvas, setCanvas] = useState({ w: 0, h: 0 });
+    const [warningVisible, setWarningVisible] = useState(false);
+
+    // Pick up edits made after "Done" (e.g. a wall deleted in Plan Preview)
+    // when navigation lands back here with fresh params.
+    useEffect(() => {
+        if (route.params?.updatedWalls) {
+            setWalls(route.params.updatedWalls);
+            setUndoStack([]);
+            setRedoStack([]);
+            navigation.setParams({ updatedWalls: undefined });
+        }
+    }, [route.params?.updatedWalls]);
+
+    const { closed } = chainRoom(walls);
+    const hasGap = walls.length > 0 && !closed;
 
     // Latest values for the persistent PanResponder callbacks.
     const stateRef = useRef({});
@@ -133,21 +156,33 @@ export const DrawWallsScreen = ({ navigation, route }) => {
                 const t = transformRef.current;
                 const { mode: m } = stateRef.current;
                 if (m === "draw") {
-                    const p = screenToContent(x, y);
-                    gestureRef.current = { kind: "draw", start: p, s: t.s };
-                    setCurrent({ x1: p.x, y1: p.y, x2: p.x, y2: p.y });
+                    const raw = screenToContent(x, y);
+                    const { point } = snapPoint(
+                        raw,
+                        collectEndpoints(stateRef.current.walls),
+                        SNAP_RADIUS / t.s
+                    );
+                    gestureRef.current = { kind: "draw", start: point, s: t.s };
+                    setCurrent({ x1: point.x, y1: point.y, x2: point.x, y2: point.y });
                 } else if (m === "resize") {
                     const p = screenToContent(x, y);
                     const hit = nearestEndpoint(p.x, p.y, PICK_RADIUS / t.s);
-                    gestureRef.current = hit
-                        ? {
-                              kind: "resize",
-                              ...hit,
-                              before: stateRef.current.walls,
-                              s: t.s,
-                              moved: false,
-                          }
-                        : { kind: "pan", startTransform: { ...t } };
+                    if (hit) {
+                        const hitWall = stateRef.current.walls[hit.index];
+                        const anchor =
+                            hit.end === 1
+                                ? { x: hitWall.x1, y: hitWall.y1 }
+                                : { x: hitWall.x2, y: hitWall.y2 };
+                        gestureRef.current = {
+                            kind: "resize",
+                            group: findCornerGroup(stateRef.current.walls, anchor),
+                            before: stateRef.current.walls,
+                            s: t.s,
+                            moved: false,
+                        };
+                    } else {
+                        gestureRef.current = { kind: "pan", startTransform: { ...t } };
+                    }
                 } else {
                     gestureRef.current = { kind: "pan", startTransform: { ...t } };
                 }
@@ -166,29 +201,53 @@ export const DrawWallsScreen = ({ navigation, route }) => {
                 if (g.kind === "zoom") return;
 
                 if (g.kind === "draw") {
+                    const raw = {
+                        x: g.start.x + gs.dx / g.s,
+                        y: g.start.y + gs.dy / g.s,
+                    };
+                    const { point, snapped } = snapPoint(
+                        raw,
+                        collectEndpoints(stateRef.current.walls),
+                        SNAP_RADIUS / g.s
+                    );
                     setCurrent({
                         x1: g.start.x,
                         y1: g.start.y,
-                        x2: g.start.x + gs.dx / g.s,
-                        y2: g.start.y + gs.dy / g.s,
+                        x2: point.x,
+                        y2: point.y,
+                        snapped,
                     });
                 } else if (g.kind === "resize") {
                     g.moved = true;
+                    const anchorMember = g.group[0];
+                    const bw = g.before[anchorMember.index];
+                    const anchorBefore =
+                        anchorMember.end === 1
+                            ? { x: bw.x1, y: bw.y1 }
+                            : { x: bw.x2, y: bw.y2 };
+                    const raw = {
+                        x: anchorBefore.x + gs.dx / g.s,
+                        y: anchorBefore.y + gs.dy / g.s,
+                    };
+                    const { point } = snapPoint(
+                        raw,
+                        collectEndpoints(stateRef.current.walls, g.group),
+                        SNAP_RADIUS / g.s
+                    );
                     setWalls((ws) =>
                         ws.map((w, i) => {
-                            if (i !== g.index) return w;
-                            const bw = g.before[g.index];
-                            return g.end === 1
-                                ? {
-                                      ...w,
-                                      x1: bw.x1 + gs.dx / g.s,
-                                      y1: bw.y1 + gs.dy / g.s,
-                                  }
-                                : {
-                                      ...w,
-                                      x2: bw.x2 + gs.dx / g.s,
-                                      y2: bw.y2 + gs.dy / g.s,
-                                  };
+                            const hitsX1 = g.group.some(
+                                (m) => m.index === i && m.end === 1
+                            );
+                            const hitsX2 = g.group.some(
+                                (m) => m.index === i && m.end === 2
+                            );
+                            if (!hitsX1 && !hitsX2) return w;
+                            return {
+                                ...w,
+                                ...(hitsX1 ? { x1: point.x, y1: point.y } : {}),
+                                ...(hitsX2 ? { x2: point.x, y2: point.y } : {}),
+                            };
                         })
                     );
                 } else if (g.kind === "pan") {
@@ -203,16 +262,20 @@ export const DrawWallsScreen = ({ navigation, route }) => {
                 if (g.kind === "draw") {
                     setCurrent(null);
                     if (Math.hypot(gs.dx, gs.dy) >= MIN_WALL) {
+                        const raw = {
+                            x: g.start.x + gs.dx / g.s,
+                            y: g.start.y + gs.dy / g.s,
+                        };
+                        const { point: end } = snapPoint(
+                            raw,
+                            collectEndpoints(stateRef.current.walls),
+                            SNAP_RADIUS / g.s
+                        );
                         const before = stateRef.current.walls;
                         pushHistory(before);
                         setWalls([
                             ...before,
-                            {
-                                x1: g.start.x,
-                                y1: g.start.y,
-                                x2: g.start.x + gs.dx / g.s,
-                                y2: g.start.y + gs.dy / g.s,
-                            },
+                            { x1: g.start.x, y1: g.start.y, x2: end.x, y2: end.y },
                         ]);
                     }
                 } else if (g.kind === "resize" && g.moved) {
@@ -243,11 +306,15 @@ export const DrawWallsScreen = ({ navigation, route }) => {
             {/* Header */}
             <View style={styles.header}>
                 <AnimatedPressable
-                    onPress={() =>
-                        hasWalls
-                            ? navigation.navigate("PlanPreview", { walls, imageUri })
-                            : navigation.goBack()
-                    }
+                    onPress={() => {
+                        if (!hasWalls) {
+                            navigation.goBack();
+                        } else if (hasGap) {
+                            setWarningVisible(true);
+                        } else {
+                            navigation.navigate("PlanPreview", { walls, imageUri });
+                        }
+                    }}
                     scaleTo={0.94}
                     style={[styles.doneButton, hasWalls && styles.doneActive]}
                 >
@@ -285,6 +352,12 @@ export const DrawWallsScreen = ({ navigation, route }) => {
                     </AnimatedPressable>
                 </View>
             </View>
+
+            {/* Gap warning */}
+            <GapWarningBanner
+                visible={warningVisible && hasGap}
+                onDismiss={() => setWarningVisible(false)}
+            />
 
             {/* Canvas */}
             <View
@@ -362,6 +435,17 @@ export const DrawWallsScreen = ({ navigation, route }) => {
                                 strokeWidth={WALL_WIDTH}
                                 strokeLinecap="round"
                                 opacity={0.6}
+                            />
+                        )}
+
+                        {current?.snapped && (
+                            <Circle
+                                cx={current.x2}
+                                cy={current.y2}
+                                r={10 / transform.s}
+                                fill="none"
+                                stroke={colors.primary}
+                                strokeWidth={2.5 / transform.s}
                             />
                         )}
 

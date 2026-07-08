@@ -8,6 +8,7 @@ import { AccountScreen } from "../screens/AccountScreen";
 import { FloorPlanScreen } from "../screens/FloorPlanScreen";
 import { DrawWallsScreen } from "../screens/DrawWallsScreen";
 import { PlanPreviewScreen } from "../screens/PlanPreviewScreen";
+import { Room3DScreen } from "../screens/Room3DScreen";
 import { colors, shadow } from "../utils/theme";
 
 const Stack = createNativeStackNavigator();
@@ -66,15 +67,20 @@ const RootNavigator = () => {
                 component={FloorPlanScreen}
                 options={{ animation: "slide_from_right" }}
             />
-            <Stack.Screen
+            <Stack.Screen 
                 name="DrawWalls"
                 component={DrawWallsScreen}
-                options={{ animation: "slide_from_right" }}
+                options={{ animation: "slide_from_right", gestureEnabled: false }}
             />
             <Stack.Screen
                 name="PlanPreview"
                 component={PlanPreviewScreen}
-                options={{ animation: "fade" }}
+                options={{ animation: "fade", gestureEnabled: false }}
+            />
+            <Stack.Screen
+                name="Room3D"
+                component={Room3DScreen}
+                options={{ animation: "fade", gestureEnabled: false }}
             />
         </Stack.Navigator>
     );
