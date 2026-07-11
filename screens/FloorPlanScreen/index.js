@@ -2,15 +2,18 @@ import { Ionicons } from "@expo/vector-icons";
 import { useState } from "react";
 import {
     ActionSheetIOS,
+    ActivityIndicator,
     Alert,
     Image,
     Platform,
     ScrollView,
     StyleSheet,
     Text,
+    useWindowDimensions,
     View,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
+import { recognizeFloorPlan, recognizedToWalls } from "../../utils/autoRecognize";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AdjustPhotoModal } from "../../components/AdjustPhotoModal";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
@@ -22,19 +25,26 @@ import {
 } from "../../components/FloorPlanShapes";
 import { colors, radius, shadow } from "../../utils/theme";
 
+// Fixed drawing scale so a generated diagram has the SAME real-world size on
+// every device (previously shapes were scaled to fit the screen, which made
+// their measured dimensions change with screen width). The room outlines are
+// authored in a ~120×100 unit space; each unit maps to a fixed number of feet
+// at the app's 26 px/ft, giving sensible, device-independent room sizes.
+const PIXELS_PER_FOOT = 26; // must match the scale used across the app
+const FEET_PER_UNIT = 0.15; // a single blank room: 80-unit outline → 12 ft
+const CONTENT_SCALE = FEET_PER_UNIT * PIXELS_PER_FOOT; // px per outline unit
+// Multi-room preset apartments span the same unit space as a single blank room
+// but represent a whole home, so they use a larger real-world scale — otherwise
+// each bedroom comes out tiny and cramped to walk through in 3D.
+const PRESET_FEET_PER_UNIT = 0.3; // 80-unit apartment → ~24 ft across
+const PRESET_SCALE = PRESET_FEET_PER_UNIT * PIXELS_PER_FOOT;
+
 const IMPORT_OPTIONS = [
     {
         key: "upload",
         title: "Upload Floor Plan",
         subtitle: "Photo Gallery or Camera",
         icon: "cloud-upload-outline",
-    },
-    {
-        key: "scan",
-        title: "Scan Your Room",
-        subtitle: "Scan your room and turn it into a 3D layout",
-        icon: "scan-outline",
-        pro: true,
     },
 ];
 
@@ -46,6 +56,176 @@ const BLANK_SHAPES = [
     { key: "rounded", label: "Rounded", variant: "rounded" },
     { key: "zshape", label: "Z-shape", variant: "zshape" },
 ];
+
+// Sample a quadratic Bézier into `steps` straight points (skipping the start).
+const quadPoints = (p0, c, p1, steps) => {
+    const out = [];
+    for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const mt = 1 - t;
+        out.push([
+            mt * mt * p0[0] + 2 * mt * t * c[0] + t * t * p1[0],
+            mt * mt * p0[1] + 2 * mt * t * c[1] + t * t * p1[1],
+        ]);
+    }
+    return out;
+};
+
+// Corner outlines for each "Start from Blank" shape, in the same 120×100
+// space used by the shape thumbnails (FloorPlanShapes). Each is a closed
+// polygon of [x, y] points; the arched top of "rounded" is tessellated.
+const SHAPE_POLYGONS = {
+    rectangular: [[20, 25], [100, 25], [100, 80], [20, 80]],
+    lshape: [[20, 25], [70, 25], [70, 50], [100, 50], [100, 80], [20, 80]],
+    tshape: [
+        [40, 22], [80, 22], [80, 45], [102, 45],
+        [102, 80], [18, 80], [18, 45], [40, 45],
+    ],
+    cut: [[20, 25], [82, 25], [100, 43], [100, 80], [20, 80]],
+    zshape: [
+        [20, 25], [72, 25], [72, 48], [100, 48],
+        [100, 80], [48, 80], [48, 58], [20, 58],
+    ],
+    rounded: [
+        [20, 80],
+        [20, 50],
+        ...quadPoints([20, 50], [20, 25], [60, 25], 6),
+        ...quadPoints([60, 25], [100, 25], [100, 50], 6),
+        [100, 80],
+    ],
+};
+
+// Convert an outline polygon into wall segments, scaled up to content space
+// (~PIXELS_PER_FOOT) and centered horizontally on a `screenWidth`-wide canvas.
+// Doors/windows for each "Start from Blank" shape (same thumbnail format the
+// outlines use), so a selected shape carries them into Plan Preview.
+const SHAPE_OPENINGS = {
+    rectangular: {
+        doors: [{ hinge: [34, 25], open: [34, 37], flip: true }],
+        windows: [[40, 80, 54, 80], [66, 80, 80, 80]],
+    },
+    lshape: {
+        doors: [{ hinge: [20, 38], open: [32, 38] }],
+        windows: [[34, 25, 46, 25], [100, 58, 100, 70], [56, 80, 70, 80]],
+    },
+    tshape: {
+        doors: [{ hinge: [52, 80], open: [52, 68] }],
+        windows: [[48, 22, 60, 22], [102, 54, 102, 66]],
+    },
+    cut: {
+        doors: [{ hinge: [32, 80], open: [32, 68] }],
+        windows: [[36, 25, 50, 25], [100, 52, 100, 64]],
+    },
+    rounded: {
+        doors: [{ hinge: [52, 80], open: [52, 68] }],
+        windows: [[30, 80, 42, 80], [76, 80, 88, 80]],
+    },
+    zshape: {
+        doors: [{ hinge: [20, 34], open: [32, 34] }],
+        windows: [[32, 25, 46, 25], [100, 56, 100, 68]],
+    },
+};
+
+// Nearest raw wall to a thumbnail-space point, with the projected fraction
+// (0..1) along it — used to attach a door/window to the wall it sits on.
+const nearestWallHit = (rawWalls, px, py) => {
+    let best = null;
+    rawWalls.forEach((w, index) => {
+        const dx = w.x2 - w.x1;
+        const dy = w.y2 - w.y1;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 ? ((px - w.x1) * dx + (py - w.y1) * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const d = Math.hypot(px - (w.x1 + t * dx), py - (w.y1 + t * dy));
+        if (!best || d < best.d) best = { index, t, d };
+    });
+    return best;
+};
+
+// Core converter: raw thumbnail-space wall segments + thumbnail-format
+// doors/windows → Plan Preview walls with openings, scaled to content space
+// and centered on a `screenWidth`-wide canvas.
+const buildRoom = (rawWalls, doors, windows, screenWidth, scale = CONTENT_SCALE) => {
+    if (rawWalls.length < 3) return [];
+    const xs = rawWalls.flatMap((w) => [w.x1, w.x2]);
+    const ys = rawWalls.flatMap((w) => [w.y1, w.y2]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const offX = (screenWidth - (maxX - minX) * scale) / 2 - minX * scale;
+    const offY = 220 - minY * scale;
+    const TX = (x) => x * scale + offX;
+    const TY = (y) => y * scale + offY;
+
+    const walls = rawWalls.map((w) => ({
+        x1: TX(w.x1),
+        y1: TY(w.y1),
+        x2: TX(w.x2),
+        y2: TY(w.y2),
+        openings: [],
+    }));
+
+    (windows || []).forEach(([wx1, wy1, wx2, wy2]) => {
+        const hit = nearestWallHit(rawWalls, (wx1 + wx2) / 2, (wy1 + wy2) / 2);
+        if (!hit || hit.d > 8) return;
+        walls[hit.index].openings.push({
+            kind: "window",
+            t: hit.t,
+            width: Math.hypot(wx2 - wx1, wy2 - wy1) * scale,
+        });
+    });
+
+    (doors || []).forEach((d) => {
+        const [hx, hy] = d.hinge;
+        const [ox, oy] = d.open;
+        const dx = ox - hx;
+        const dy = oy - hy;
+        // The far jamb (closed leaf position) is the hinge point rotated 90°.
+        const cx = d.flip ? hx + dy : hx - dy;
+        const cy = d.flip ? hy - dx : hy + dx;
+        const hit = nearestWallHit(rawWalls, (hx + cx) / 2, (hy + cy) / 2);
+        if (!hit || hit.d > 8) return;
+        const w = rawWalls[hit.index];
+        const wl2 = (w.x2 - w.x1) ** 2 + (w.y2 - w.y1) ** 2;
+        const tOf = (x, y) =>
+            wl2 ? ((x - w.x1) * (w.x2 - w.x1) + (y - w.y1) * (w.y2 - w.y1)) / wl2 : 0;
+        walls[hit.index].openings.push({
+            kind: "door",
+            t: hit.t,
+            width: Math.hypot(dx, dy) * scale,
+            hinge: tOf(hx, hy) <= tOf(cx, cy) ? "a" : "b",
+            flip: !!d.flip,
+        });
+    });
+
+    return walls;
+};
+
+// A "Start from Blank" shape → Plan Preview walls (with its door/windows).
+const shapeToWalls = (variant, screenWidth) => {
+    const poly = SHAPE_POLYGONS[variant];
+    if (!poly) return [];
+    const rawWalls = poly.map((a, i) => {
+        const b = poly[(i + 1) % poly.length];
+        return { x1: a[0], y1: a[1], x2: b[0], y2: b[1] };
+    });
+    const spec = SHAPE_OPENINGS[variant] || {};
+    return buildRoom(rawWalls, spec.doors, spec.windows, screenWidth);
+};
+
+// A preset plan (outer shell + interior walls + doors/windows) → Plan Preview.
+const presetToRoom = (plan, screenWidth) => {
+    const raw = [];
+    if (plan.shell) {
+        const [x, y, w, h] = plan.shell;
+        raw.push({ x1: x, y1: y, x2: x + w, y2: y });
+        raw.push({ x1: x + w, y1: y, x2: x + w, y2: y + h });
+        raw.push({ x1: x + w, y1: y + h, x2: x, y2: y + h });
+        raw.push({ x1: x, y1: y + h, x2: x, y2: y });
+    }
+    (plan.walls || []).forEach(([x1, y1, x2, y2]) => raw.push({ x1, y1, x2, y2 }));
+    return buildRoom(raw, plan.doors, plan.windows, screenWidth, PRESET_SCALE);
+};
 
 const PLANS = [
     { key: "scratch", label: "Draw Walls From Scratch", draw: true },
@@ -213,8 +393,10 @@ const PLANS = [
 ];
 
 export const FloorPlanScreen = ({ navigation }) => {
+    const { width: winWidth } = useWindowDimensions();
     const [floorPlan, setFloorPlan] = useState(null);
     const [pendingAsset, setPendingAsset] = useState(null);
+    const [recognizing, setRecognizing] = useState(false);
 
     const pickSource = async (source) => {
         const options = {
@@ -283,15 +465,23 @@ export const FloorPlanScreen = ({ navigation }) => {
     const handleImport = (key) => {
         if (key === "upload") {
             chooseUploadSource();
-            return;
         }
-        // TODO: handle "scan" (PRO room scan flow)
-        console.log("import", key);
     };
 
-    const startAutoRecognition = (uri) => {
-        // TODO: run PRO automatic wall recognition on the uploaded plan
-        console.log("automatic recognition", uri);
+    const startAutoRecognition = async (uri) => {
+        setRecognizing(true);
+        try {
+            const rec = await recognizeFloorPlan(uri);
+            const walls = recognizedToWalls(rec, winWidth);
+            if (walls.length < 3) {
+                throw new Error("Couldn't build a room from the detected walls.");
+            }
+            navigation.navigate("PlanPreview", { walls });
+        } catch (e) {
+            Alert.alert("Automatic Recognition", String(e?.message ?? e));
+        } finally {
+            setRecognizing(false);
+        }
     };
     const startManualDrawing = (uri) => {
         navigation.navigate("DrawWalls", { imageUri: uri });
@@ -330,8 +520,24 @@ export const FloorPlanScreen = ({ navigation }) => {
             ]);
         }
     };
-    const handleSelectShape = (key) => console.log("shape", key);
-    const handleSelectPlan = (key) => console.log("plan", key);
+    // Selecting a "Start from Blank" shape opens Plan Preview with that
+    // outline already drawn as walls.
+    const handleSelectShape = (variant) => {
+        const walls = shapeToWalls(variant, winWidth);
+        if (walls.length) navigation.navigate("PlanPreview", { walls });
+    };
+    // "Draw Walls From Scratch" opens the empty editor; the furnished presets
+    // open Plan Preview with their walls, doors and windows drawn.
+    const handleSelectPlan = (key) => {
+        const plan = PLANS.find((p) => p.key === key);
+        if (!plan) return;
+        if (plan.draw) {
+            navigation.navigate("DrawWalls", {});
+            return;
+        }
+        const walls = presetToRoom(plan, winWidth);
+        if (walls.length) navigation.navigate("PlanPreview", { walls });
+    };
 
     return (
         <SafeAreaView style={styles.safeArea} edges={["top"]}>
@@ -500,6 +706,18 @@ export const FloorPlanScreen = ({ navigation }) => {
                     setTimeout(() => showImportOptions(uri), 450);
                 }}
             />
+
+            {recognizing && (
+                <View style={styles.recognizeOverlay} pointerEvents="auto">
+                    <View style={styles.recognizeCard}>
+                        <ActivityIndicator size="large" color={colors.primary} />
+                        <Text style={styles.recognizeTitle}>Recognizing floor plan…</Text>
+                        <Text style={styles.recognizeSub}>
+                            Detecting walls, doors and windows with AI.
+                        </Text>
+                    </View>
+                </View>
+            )}
         </SafeAreaView>
     );
 };
@@ -508,6 +726,34 @@ const styles = StyleSheet.create({
     safeArea: {
         flex: 1,
         backgroundColor: colors.background,
+    },
+    recognizeOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        backgroundColor: "rgba(15,23,42,0.45)",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 50,
+    },
+    recognizeCard: {
+        backgroundColor: colors.surface,
+        borderRadius: radius.lg,
+        paddingVertical: 28,
+        paddingHorizontal: 32,
+        alignItems: "center",
+        maxWidth: 300,
+        ...shadow.floating,
+    },
+    recognizeTitle: {
+        fontSize: 17,
+        fontWeight: "700",
+        color: colors.text,
+        marginTop: 16,
+    },
+    recognizeSub: {
+        fontSize: 13,
+        color: colors.textMuted,
+        marginTop: 6,
+        textAlign: "center",
     },
     header: {
         flexDirection: "row",

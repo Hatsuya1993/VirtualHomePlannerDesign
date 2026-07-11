@@ -7,7 +7,9 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.hatsuya.VirtualHomePlannerDesign",
+      "usesAppleSignIn": true
     },
     "android": {
       "adaptiveIcon": {
@@ -15,7 +17,10 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -29,7 +34,28 @@
           "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera to capture a floor plan."
         }
       ],
-      "expo-asset"
-    ]
+      "expo-asset",
+      "expo-sharing",
+      "expo-apple-authentication",
+      [
+        "@react-native-google-signin/google-signin",
+        {
+          "iosUrlScheme": "com.googleusercontent.apps.638157894329-fbae48fuvo98if3135u5vquvej38ivd8"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "useFrameworks": "static"
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "3d9faa5c-03b6-46d0-ac9c-2818aa7c6d42"
+      }
+    }
   }
 }

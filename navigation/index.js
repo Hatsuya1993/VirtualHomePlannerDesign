@@ -5,10 +5,15 @@ import { Ionicons } from "@expo/vector-icons";
 import { DesignsScreen } from "../screens/DesignsScreen";
 import { CreateScreen } from "../screens/CreateScreen";
 import { AccountScreen } from "../screens/AccountScreen";
+import { WelcomeScreen } from "../screens/WelcomeScreen";
+import { AuthScreen } from "../screens/AuthScreen";
 import { FloorPlanScreen } from "../screens/FloorPlanScreen";
 import { DrawWallsScreen } from "../screens/DrawWallsScreen";
 import { PlanPreviewScreen } from "../screens/PlanPreviewScreen";
 import { Room3DScreen } from "../screens/Room3DScreen";
+import { MeasurementsScreen } from "../screens/MeasurementsScreen";
+import { AiRedesignScreen } from "../screens/AiRedesignScreen";
+import { useAuth } from "../context/AuthContext";
 import { colors, shadow } from "../utils/theme";
 
 const Stack = createNativeStackNavigator();
@@ -52,36 +57,66 @@ const HomeTabs = () => {
 };
 
 const RootNavigator = () => {
+    const { user } = useAuth();
     return (
         <Stack.Navigator
-            initialRouteName={"HomeScreen"}
             screenOptions={{
                 headerShown: false,
                 animation: "fade",
                 contentStyle: { backgroundColor: colors.background },
             }}
         >
-            <Stack.Screen name="HomeScreen" component={HomeTabs} />
-            <Stack.Screen
-                name="FloorPlan"
-                component={FloorPlanScreen}
-                options={{ animation: "slide_from_right" }}
-            />
-            <Stack.Screen 
-                name="DrawWalls"
-                component={DrawWallsScreen}
-                options={{ animation: "slide_from_right", gestureEnabled: false }}
-            />
-            <Stack.Screen
-                name="PlanPreview"
-                component={PlanPreviewScreen}
-                options={{ animation: "fade", gestureEnabled: false }}
-            />
-            <Stack.Screen
-                name="Room3D"
-                component={Room3DScreen}
-                options={{ animation: "fade", gestureEnabled: false }}
-            />
+            {user ? (
+                <>
+                    <Stack.Screen name="HomeScreen" component={HomeTabs} />
+                    <Stack.Screen
+                        name="FloorPlan"
+                        component={FloorPlanScreen}
+                        options={{ animation: "slide_from_right" }}
+                    />
+                    <Stack.Screen
+                        name="DrawWalls"
+                        component={DrawWallsScreen}
+                        options={{ animation: "slide_from_right", gestureEnabled: false }}
+                    />
+                    <Stack.Screen
+                        name="PlanPreview"
+                        component={PlanPreviewScreen}
+                        options={{ animation: "fade", gestureEnabled: false }}
+                    />
+                    <Stack.Screen
+                        name="Room3D"
+                        component={Room3DScreen}
+                        options={{ animation: "fade", gestureEnabled: false }}
+                    />
+                    <Stack.Screen
+                        name="Measurements"
+                        component={MeasurementsScreen}
+                        options={{ animation: "slide_from_right", gestureEnabled: false }}
+                    />
+                    <Stack.Screen
+                        name="AiRedesign"
+                        component={AiRedesignScreen}
+                        options={{ animation: "slide_from_right" }}
+                    />
+                </>
+            ) : (
+                <>
+                    <Stack.Screen name="Welcome" component={WelcomeScreen} />
+                    <Stack.Screen
+                        name="Register"
+                        component={AuthScreen}
+                        initialParams={{ mode: "register" }}
+                        options={{ animation: "slide_from_right" }}
+                    />
+                    <Stack.Screen
+                        name="Login"
+                        component={AuthScreen}
+                        initialParams={{ mode: "login" }}
+                        options={{ animation: "slide_from_right" }}
+                    />
+                </>
+            )}
         </Stack.Navigator>
     );
 };

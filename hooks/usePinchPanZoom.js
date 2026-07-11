@@ -28,6 +28,7 @@ export const usePinchPanZoom = ({
     maxScale = 6,
     onTap,
     hitTest,
+    onDragStart,
     onDragMove,
     onDragEnd,
 } = {}) => {
@@ -39,6 +40,8 @@ export const usePinchPanZoom = ({
     onTapRef.current = onTap;
     const hitTestRef = useRef(hitTest);
     hitTestRef.current = hitTest;
+    const onDragStartRef = useRef(onDragStart);
+    onDragStartRef.current = onDragStart;
     const onDragMoveRef = useRef(onDragMove);
     onDragMoveRef.current = onDragMove;
     const onDragEndRef = useRef(onDragEnd);
@@ -94,6 +97,7 @@ export const usePinchPanZoom = ({
                 const target = hitTestRef.current?.(toContent(locationX, locationY));
                 if (target) {
                     gestureRef.current = { kind: "drag", target };
+                    onDragStartRef.current?.(target);
                 } else {
                     gestureRef.current = {
                         kind: "pan",
@@ -153,5 +157,23 @@ export const usePinchPanZoom = ({
 
     const reset = () => setTransform({ s: 1, tx: 0, ty: 0 });
 
-    return { transform, panHandlers: responder.panHandlers, reset };
+    // Scale + center content `bounds` (in content space) to fit a viewport of
+    // `viewW` × `viewH`, leaving `pad` points of margin. Used for an initial
+    // "fit the whole plan on screen" view.
+    const fitTo = (bounds, viewW, viewH, pad = 40) => {
+        if (!bounds || viewW <= 0 || viewH <= 0) return;
+        const bw = bounds.maxX - bounds.minX;
+        const bh = bounds.maxY - bounds.minY;
+        if (bw <= 0 || bh <= 0) return;
+        const s = clamp(
+            Math.min((viewW - pad * 2) / bw, (viewH - pad * 2) / bh),
+            minScale,
+            maxScale
+        );
+        const tx = (viewW - bw * s) / 2 - bounds.minX * s;
+        const ty = (viewH - bh * s) / 2 - bounds.minY * s;
+        setTransform({ s, tx, ty });
+    };
+
+    return { transform, panHandlers: responder.panHandlers, reset, fitTo };
 };

@@ -1,6 +1,9 @@
-import { Ionicons } from "@expo/vector-icons";
-import { useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { useEffect, useRef, useState } from "react";
+import { Alert, Pressable, Share, StyleSheet, Text, View } from "react-native";
+import { File, Paths } from "expo-file-system";
+import * as Print from "expo-print";
+import * as Sharing from "expo-sharing";
 import Svg, {
     Circle,
     ClipPath,
@@ -15,20 +18,27 @@ import Svg, {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { GapWarningBanner } from "../../components/GapWarningBanner";
+import { StatsSheet } from "../../components/StatsSheet";
 import { WallSizeSheet } from "../../components/WallSizeSheet";
 import { usePinchPanZoom } from "../../hooks/usePinchPanZoom";
+import { useUnits } from "../../context/UnitsContext";
 import {
     chainRoom,
     collectEndpoints,
     findCornerGroup,
     hitTestWall,
+    openEndpoints,
     projectOntoSegment,
+    roomOutline,
     snapPoint,
+    wallsHaveGap,
 } from "../../utils/roomGeometry";
+import { buildPlanHtml, buildShareText, computeStats } from "../../utils/planStats";
 import { colors, radius } from "../../utils/theme";
 
 const WALL_COLOR = "#4C7CA8";
 const SELECTED_COLOR = colors.info;
+const GAP_HIGHLIGHT = "#EF4444"; // red marker for the loose wall ends causing a gap
 const WALL_WIDTH = 9;
 const HIT_RADIUS = 24; // screen-space tap tolerance for selecting a wall
 const HANDLE_RADIUS = 26; // screen-space tap tolerance for grabbing a wall endpoint / opening
@@ -47,6 +57,7 @@ const OPENING_MENU_WIDTH = 336;
 const OPENING_DEFAULTS = {
     window: { width: 46 },
     door: { width: 40, hinge: "a", flip: false },
+    opening: { width: 40 },
 };
 
 // Cycle order for the door "Rotate" action — covers all 4 hinge/swing combos.
@@ -71,11 +82,27 @@ const WINDOW_ACTIONS = [
     { key: "delete", icon: "trash-outline", label: "Delete" },
 ];
 const DOOR_ACTIONS = [
-    { key: "color", icon: "color-palette-outline", label: "Color" },
     { key: "size", icon: "resize-outline", label: "Size" },
     { key: "copy", icon: "copy-outline", label: "Copy" },
     { key: "rotate", icon: "reload-outline", label: "Rotate" },
+    { key: "flip", icon: "swap-horizontal-outline", label: "Flip" },
     { key: "delete", icon: "trash-outline", label: "Delete" },
+];
+
+// Header "•••" overflow menu (Profile Settings intentionally omitted).
+const MORE_ACTIONS = [
+    { key: "measure", lib: "mci", icon: "ruler", label: "Measure with a ruler" },
+    { key: "help", lib: "ion", icon: "help-circle-outline", label: "Help and Feedback" },
+    { key: "love", lib: "ion", icon: "heart-outline", label: "I Love It!" },
+    { key: "upgrade", lib: "mci", icon: "crown-outline", label: "Upgrade to PRO+" },
+];
+
+const SHARE_ACTIONS = [
+    { key: "share", icon: "share-outline", label: "Share" },
+    { key: "copy", icon: "copy-outline", label: "Save a Copy" },
+    { key: "image", icon: "image-outline", label: "Image" },
+    { key: "stats", icon: "stats-chart-outline", label: "Stats" },
+    { key: "pdf", icon: "document-text-outline", label: "PDF" },
 ];
 
 // Deterministic RNG so the floor pattern is stable across renders.
@@ -163,6 +190,125 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     const [addOpeningKind, setAddOpeningKind] = useState(null); // null | "window" | "door"
     const [selectedOpening, setSelectedOpening] = useState(null); // { wallIndex, openingIndex } | null
     const [resizingOpening, setResizingOpening] = useState(null); // { wallIndex, openingIndex } | null
+    const [moreMenuVisible, setMoreMenuVisible] = useState(false);
+    const [shareMenuVisible, setShareMenuVisible] = useState(false);
+    const [statsVisible, setStatsVisible] = useState(false);
+    const { units } = useUnits();
+    const svgRef = useRef(null);
+
+    // Undo/redo history for wall edits. `wallsRef` always holds the latest
+    // committed walls so snapshots taken inside event handlers are current.
+    const wallsRef = useRef(walls);
+    wallsRef.current = walls;
+    const undoStack = useRef([]);
+    const redoStack = useRef([]);
+    const pendingSnapRef = useRef(null); // pre-drag walls, committed only if the drag actually edits
+    const [, forceHist] = useState(0);
+    const bumpHist = () => forceHist((n) => n + 1);
+
+    // Record a walls state as an undo point, discarding any redo history (a new
+    // edit forks the timeline).
+    const pushUndo = (state) => {
+        undoStack.current.push(state);
+        if (undoStack.current.length > 50) undoStack.current.shift();
+        redoStack.current = [];
+        bumpHist();
+    };
+
+    // Snapshot the current walls before a discrete (non-drag) mutation.
+    const snapshot = () => pushUndo(wallsRef.current);
+
+    const clearSelectionState = () => {
+        setSelectedWall(null);
+        setSelectedOpening(null);
+        setResizingOpening(null);
+        setAddMenuVisible(false);
+        setSplitMode(false);
+        setAddOpeningKind(null);
+    };
+
+    const undo = () => {
+        if (undoStack.current.length === 0) return;
+        redoStack.current.push(wallsRef.current);
+        const prev = undoStack.current.pop();
+        wallsRef.current = prev;
+        setWalls(prev);
+        clearSelectionState();
+        bumpHist();
+    };
+
+    const redo = () => {
+        if (redoStack.current.length === 0) return;
+        undoStack.current.push(wallsRef.current);
+        const next = redoStack.current.pop();
+        wallsRef.current = next;
+        setWalls(next);
+        clearSelectionState();
+        bumpHist();
+    };
+
+    const canUndo = undoStack.current.length > 0;
+    const canRedo = redoStack.current.length > 0;
+
+    // Capture the on-screen plan canvas to a base64 PNG (no data: prefix).
+    const capturePng = () =>
+        new Promise((resolve) => {
+            if (!svgRef.current?.toDataURL) return resolve(null);
+            svgRef.current.toDataURL((data) => resolve(data));
+        });
+
+    const shareStats = () => computeStats(walls, PIXELS_PER_FOOT);
+
+    const handleShareAction = async (key) => {
+        setShareMenuVisible(false);
+        try {
+            if (key === "stats") {
+                setStatsVisible(true);
+                return;
+            }
+            if (key === "share") {
+                await Share.share({ message: buildShareText(shareStats(), units) });
+                return;
+            }
+            if (key === "image") {
+                const png = await capturePng();
+                if (!png) return Alert.alert("Image", "Could not capture the plan.");
+                const file = new File(Paths.cache, `floorplan-${Date.now()}.png`);
+                file.create();
+                file.write(png, { encoding: "base64" });
+                if (await Sharing.isAvailableAsync()) {
+                    await Sharing.shareAsync(file.uri, {
+                        mimeType: "image/png",
+                        UTI: "public.png",
+                        dialogTitle: "Share floor plan image",
+                    });
+                }
+                return;
+            }
+            if (key === "pdf") {
+                const png = await capturePng();
+                const html = buildPlanHtml(shareStats(), units, png);
+                const { uri } = await Print.printToFileAsync({ html });
+                if (await Sharing.isAvailableAsync()) {
+                    await Sharing.shareAsync(uri, {
+                        mimeType: "application/pdf",
+                        UTI: "com.adobe.pdf",
+                        dialogTitle: "Share floor plan PDF",
+                    });
+                }
+                return;
+            }
+            if (key === "copy") {
+                const file = new File(Paths.document, `floorplan-copy-${Date.now()}.json`);
+                file.create();
+                file.write(JSON.stringify({ walls, savedAt: new Date().toISOString() }, null, 2));
+                Alert.alert("Saved a Copy", "A copy of this plan was saved to your device.");
+                return;
+            }
+        } catch (e) {
+            Alert.alert("Something went wrong", String(e?.message ?? e));
+        }
+    };
 
     // While armed, the next tap adds a new node at the point pressed along
     // the selected wall, splitting it into two walls joined there.
@@ -182,6 +328,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         if (Math.hypot(mid.x - a.x, mid.y - a.y) < minDist) return;
         if (Math.hypot(mid.x - b.x, mid.y - b.y) < minDist) return;
 
+        snapshot();
         setWalls((ws) => {
             const next = [...ws];
             next.splice(
@@ -215,6 +362,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         let t = ((contentPoint.x - w.x1) * dx + (contentPoint.y - w.y1) * dy) / lenSq;
         t = Math.max(halfFrac, Math.min(1 - halfFrac, t));
 
+        snapshot();
         setWalls((ws) =>
             ws.map((ww, i) =>
                 i !== selectedWall
@@ -244,6 +392,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         setSelectedWall(hit);
         setSelectedOpening(null);
         setAddMenuVisible(false);
+        setMoreMenuVisible(false);
     };
 
     // Any window/door is directly grabbable/tappable regardless of whether
@@ -391,7 +540,25 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     // it — select it (opening its own context menu) rather than treating the
     // negligible movement as a drag. Also selects its parent wall so it
     // highlights, even if the wall wasn't already selected.
+    // Remember the pre-drag walls so a genuine drag can be recorded as one undo
+    // step (and a tap that merely nudged a handle can be rolled back).
+    const handleDragStart = () => {
+        pendingSnapRef.current = wallsRef.current;
+    };
+
     const handleDragEnd = (target, _contentPoint, gs) => {
+        const pre = pendingSnapRef.current;
+        pendingSnapRef.current = null;
+        const changed = pre !== null && wallsRef.current !== pre;
+        const isTap = gs && Math.hypot(gs.dx, gs.dy) < TAP_MOVE_THRESHOLD;
+
+        if (changed && !isTap) {
+            pushUndo(pre); // genuine drag → one undo point at the pre-drag state
+        } else if (changed && isTap) {
+            wallsRef.current = pre; // barely-moved handle press → undo the nudge
+            setWalls(pre);
+        }
+
         if (
             target?.kind === "opening" &&
             gs &&
@@ -406,17 +573,51 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         }
     };
 
-    const { transform, panHandlers } = usePinchPanZoom({
+    const { transform, panHandlers, fitTo } = usePinchPanZoom({
         onTap: handleTap,
         hitTest: hitTestHandle,
+        onDragStart: handleDragStart,
         onDragMove: handleDragMove,
         onDragEnd: handleDragEnd,
     });
 
-    const { polygon, closed } = chainRoom(walls);
-    const hasGap = walls.length > 0 && !closed;
+    // Fit the whole plan on screen once, after the canvas is measured — so
+    // larger (multi-room) plans aren't shown zoomed past the screen edges.
+    const fittedRef = useRef(false);
+    useEffect(() => {
+        if (fittedRef.current || canvas.w === 0 || walls.length === 0) return;
+        const xs = walls.flatMap((w) => [w.x1, w.x2]);
+        const ys = walls.flatMap((w) => [w.y1, w.y2]);
+        fitTo(
+            {
+                minX: Math.min(...xs),
+                maxX: Math.max(...xs),
+                minY: Math.min(...ys),
+                maxY: Math.max(...ys),
+            },
+            canvas.w,
+            canvas.h
+        );
+        fittedRef.current = true;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [canvas.w, canvas.h, walls.length]);
+
+    const { polygon } = chainRoom(walls);
+    // Gate the 3D switch on whether any wall has a dangling end — this allows
+    // interior/divider walls, unlike chainRoom's stricter `closed` flag.
+    const hasGap = walls.length > 0 && wallsHaveGap(walls);
     const pointsAttr = polygon.map((p) => `${p.x},${p.y}`).join(" ");
+    // The wood floor fills the room's outer boundary — traced robustly so it
+    // still works for split-node and interior/divider rooms (where the simple
+    // chain tracer would fail). Only drawn when the room is sealed (no gaps).
+    const floorPolygon = !hasGap ? roomOutline(walls) : null;
+    const floorPoints = floorPolygon
+        ? floorPolygon.map((p) => `${p.x},${p.y}`).join(" ")
+        : "";
     const [warningVisible, setWarningVisible] = useState(() => hasGap);
+    // While warning about a gap, mark the loose wall ends so the user can see
+    // exactly where the room is open. Updates live as they drag ends together.
+    const gapEnds = warningVisible && hasGap ? openEndpoints(walls) : [];
 
     const selected = selectedWall !== null ? walls[selectedWall] : null;
     const menuPos =
@@ -501,6 +702,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
 
     const deleteSelectedOpening = () => {
         if (!selectedOpening) return;
+        snapshot();
         setWalls((ws) =>
             ws.map((w, i) =>
                 i !== selectedOpening.wallIndex
@@ -519,6 +721,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
 
     const copySelectedOpening = () => {
         if (!selectedOpening) return;
+        snapshot();
         setWalls((ws) =>
             ws.map((w, i) => {
                 if (i !== selectedOpening.wallIndex) return w;
@@ -551,6 +754,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
 
     const rotateSelectedDoor = () => {
         if (!selectedOpening) return;
+        snapshot();
         setWalls((ws) =>
             ws.map((w, i) => {
                 if (i !== selectedOpening.wallIndex) return w;
@@ -567,7 +771,24 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         );
     };
 
+    // Mirror the door's swing to the opposite side of the wall.
+    const flipSelectedDoor = () => {
+        if (!selectedOpening) return;
+        snapshot();
+        setWalls((ws) =>
+            ws.map((w, i) => {
+                if (i !== selectedOpening.wallIndex) return w;
+                const openings = w.openings.map((op, oi) =>
+                    oi === selectedOpening.openingIndex ? { ...op, flip: !op.flip } : op
+                );
+                return { ...w, openings };
+            })
+        );
+    };
+
     const deleteSelectedWall = () => {
+        if (selectedWall === null) return;
+        snapshot();
         setWalls((ws) => ws.filter((_, i) => i !== selectedWall));
         setSelectedWall(null);
         setSelectedOpening(null);
@@ -577,6 +798,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
 
     const applyWallSize = ({ lengthIn, heightIn, thicknessIn }) => {
         if (selectedWall === null) return;
+        snapshot();
         setWalls((ws) =>
             ws.map((w, i) => {
                 if (i !== selectedWall) return w;
@@ -598,9 +820,9 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     };
 
     let planks = [];
-    if (closed) {
-        const xs = polygon.map((p) => p.x);
-        const ys = polygon.map((p) => p.y);
+    if (floorPolygon) {
+        const xs = floorPolygon.map((p) => p.x);
+        const ys = floorPolygon.map((p) => p.y);
         planks = buildPlanks({
             minX: Math.min(...xs),
             maxX: Math.max(...xs),
@@ -634,20 +856,128 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 </AnimatedPressable>
 
                 <View style={styles.headerRight}>
-                    <AnimatedPressable onPress={todo("undo")} scaleTo={0.85} style={styles.iconButton} hitSlop={6}>
-                        <Ionicons name="arrow-undo-outline" size={23} color={colors.text} />
+                    <AnimatedPressable
+                        onPress={undo}
+                        disabled={!canUndo}
+                        scaleTo={0.85}
+                        style={styles.iconButton}
+                        hitSlop={6}
+                    >
+                        <Ionicons
+                            name="arrow-undo-outline"
+                            size={23}
+                            color={canUndo ? colors.text : colors.textFaint}
+                        />
                     </AnimatedPressable>
-                    <AnimatedPressable onPress={todo("snapshot")} scaleTo={0.85} style={styles.iconButton} hitSlop={6}>
-                        <Ionicons name="camera" size={24} color={colors.text} />
+                    <AnimatedPressable
+                        onPress={redo}
+                        disabled={!canRedo}
+                        scaleTo={0.85}
+                        style={styles.iconButton}
+                        hitSlop={6}
+                    >
+                        <Ionicons
+                            name="arrow-redo-outline"
+                            size={23}
+                            color={canRedo ? colors.text : colors.textFaint}
+                        />
                     </AnimatedPressable>
-                    <AnimatedPressable onPress={todo("share")} scaleTo={0.85} style={styles.iconButton} hitSlop={6}>
+                    <AnimatedPressable
+                        onPress={() => {
+                            setMoreMenuVisible(false);
+                            setShareMenuVisible((v) => !v);
+                        }}
+                        scaleTo={0.85}
+                        style={styles.iconButton}
+                        hitSlop={6}
+                    >
                         <Ionicons name="share-outline" size={24} color={colors.text} />
                     </AnimatedPressable>
-                    <AnimatedPressable onPress={todo("more")} scaleTo={0.85} style={styles.iconButton} hitSlop={6}>
+                    <AnimatedPressable
+                        onPress={() => {
+                            setShareMenuVisible(false);
+                            setMoreMenuVisible((v) => !v);
+                        }}
+                        scaleTo={0.85}
+                        style={styles.iconButton}
+                        hitSlop={6}
+                    >
                         <Ionicons name="ellipsis-horizontal" size={24} color={colors.text} />
                     </AnimatedPressable>
                 </View>
             </View>
+
+            {/* Header menus: a full-screen overlay whose backdrop dismisses on
+                any tap outside the menu box. */}
+            {(moreMenuVisible || shareMenuVisible) && (
+                <View style={styles.menuOverlay}>
+                    <Pressable
+                        style={StyleSheet.absoluteFill}
+                        onPress={() => {
+                            setMoreMenuVisible(false);
+                            setShareMenuVisible(false);
+                        }}
+                    />
+
+                    {moreMenuVisible && (
+                        <View style={styles.moreMenu}>
+                            {MORE_ACTIONS.map((action) => (
+                                <AnimatedPressable
+                                    key={action.key}
+                                    onPress={() => {
+                                        setMoreMenuVisible(false);
+                                        if (action.key === "measure") {
+                                            navigation.navigate("Measurements", { walls });
+                                        } else {
+                                            todo(action.key)();
+                                        }
+                                    }}
+                                    scaleTo={0.97}
+                                    style={styles.moreMenuItem}
+                                >
+                                    {action.lib === "mci" ? (
+                                        <MaterialCommunityIcons
+                                            name={action.icon}
+                                            size={22}
+                                            color={colors.text}
+                                            style={styles.moreMenuIcon}
+                                        />
+                                    ) : (
+                                        <Ionicons
+                                            name={action.icon}
+                                            size={22}
+                                            color={colors.text}
+                                            style={styles.moreMenuIcon}
+                                        />
+                                    )}
+                                    <Text style={styles.moreMenuLabel}>{action.label}</Text>
+                                </AnimatedPressable>
+                            ))}
+                        </View>
+                    )}
+
+                    {shareMenuVisible && (
+                        <View style={styles.shareMenu}>
+                            {SHARE_ACTIONS.map((action) => (
+                                <AnimatedPressable
+                                    key={action.key}
+                                    onPress={() => handleShareAction(action.key)}
+                                    scaleTo={0.97}
+                                    style={styles.moreMenuItem}
+                                >
+                                    <Ionicons
+                                        name={action.icon}
+                                        size={22}
+                                        color={colors.text}
+                                        style={styles.moreMenuIcon}
+                                    />
+                                    <Text style={styles.moreMenuLabel}>{action.label}</Text>
+                                </AnimatedPressable>
+                            ))}
+                        </View>
+                    )}
+                </View>
+            )}
 
             {/* Gap warning */}
             <GapWarningBanner
@@ -659,6 +989,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                     !resizingOpening
                 }
                 onDismiss={() => setWarningVisible(false)}
+                message="You need to complete your room to switch to 3D. The open ends are marked in red — drag them onto the neighbouring wall to close the gap."
             />
 
             {/* Split-mode instructions */}
@@ -673,7 +1004,11 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 visible={!!addOpeningKind}
                 onDismiss={() => setAddOpeningKind(null)}
                 message={`Tap a point on the selected wall to place ${
-                    addOpeningKind === "door" ? "a door" : "a window"
+                    addOpeningKind === "door"
+                        ? "a door"
+                        : addOpeningKind === "opening"
+                        ? "an opening"
+                        : "a window"
                 } there.`}
             />
 
@@ -695,10 +1030,10 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 }
                 {...panHandlers}
             >
-                <Svg width="100%" height="100%">
+                <Svg ref={svgRef} width="100%" height="100%">
                     <Defs>
                         <ClipPath id="room">
-                            <Polygon points={pointsAttr} />
+                            <Polygon points={floorPoints || pointsAttr} />
                         </ClipPath>
                     </Defs>
 
@@ -718,10 +1053,10 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                             />
                         )}
 
-                        {/* Wood floor clipped to the room (closed rooms only) */}
-                        {closed && (
+                        {/* Wood floor clipped to the room's outer boundary */}
+                        {floorPolygon && (
                             <G clipPath="url(#room)">
-                                <Polygon points={pointsAttr} fill="#C4A981" />
+                                <Polygon points={floorPoints} fill="#C4A981" />
                                 {planks.map((p, i) => (
                                     <Rect
                                         key={i}
@@ -792,6 +1127,11 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                             />
                                         </G>
                                     );
+                                }
+
+                                // Plain opening: just the gap in the wall.
+                                if (op.kind === "opening") {
+                                    return <G key={`op${i}_${oi}`}>{gap}</G>;
                                 }
 
                                 const tick = 5 / transform.s;
@@ -904,6 +1244,34 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                     </>
                                 );
                             })()}
+
+                        {/* Gap highlights: mark the loose wall ends causing the
+                            open room, drawn last so they sit above everything. */}
+                        {gapEnds.map((p, i) => (
+                            <G key={`gap${i}`}>
+                                <Circle
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r={18 / transform.s}
+                                    fill={GAP_HIGHLIGHT}
+                                    opacity={0.2}
+                                />
+                                <Circle
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r={11 / transform.s}
+                                    fill="none"
+                                    stroke={GAP_HIGHLIGHT}
+                                    strokeWidth={3.5 / transform.s}
+                                />
+                                <Circle
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r={4 / transform.s}
+                                    fill={GAP_HIGHLIGHT}
+                                />
+                            </G>
+                        ))}
                     </G>
                 </Svg>
 
@@ -945,7 +1313,8 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                         setSplitMode(true);
                                     } else if (
                                         action.key === "window" ||
-                                        action.key === "door"
+                                        action.key === "door" ||
+                                        action.key === "opening"
                                     ) {
                                         setAddOpeningKind(action.key);
                                     } else {
@@ -977,6 +1346,8 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                         setSelectedOpening(null);
                                     } else if (action.key === "rotate") {
                                         rotateSelectedDoor();
+                                    } else if (action.key === "flip") {
+                                        flipSelectedDoor();
                                     } else {
                                         todo(
                                             `${selectedOpeningData?.kind} ${action.key}`
@@ -1025,6 +1396,12 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 pixelsPerFoot={PIXELS_PER_FOOT}
                 onClose={() => setSizeSheetVisible(false)}
                 onApply={applyWallSize}
+            />
+
+            <StatsSheet
+                visible={statsVisible}
+                stats={statsVisible ? computeStats(walls, PIXELS_PER_FOOT) : null}
+                onClose={() => setStatsVisible(false)}
             />
         </SafeAreaView>
     );
@@ -1116,6 +1493,56 @@ const styles = StyleSheet.create({
     },
     addMenuLabel: {
         fontSize: 15,
+        fontWeight: "600",
+        color: colors.text,
+        marginLeft: 14,
+    },
+    menuOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        zIndex: 30,
+    },
+    moreMenu: {
+        position: "absolute",
+        top: 52,
+        right: 12,
+        width: 260,
+        backgroundColor: colors.surface,
+        borderRadius: radius.lg,
+        paddingVertical: 8,
+        zIndex: 20,
+        shadowColor: "#0F172A",
+        shadowOpacity: 0.18,
+        shadowRadius: 16,
+        shadowOffset: { width: 0, height: 8 },
+        elevation: 12,
+    },
+    shareMenu: {
+        position: "absolute",
+        top: 52,
+        right: 46,
+        width: 230,
+        backgroundColor: colors.surface,
+        borderRadius: radius.lg,
+        paddingVertical: 8,
+        zIndex: 20,
+        shadowColor: "#0F172A",
+        shadowOpacity: 0.18,
+        shadowRadius: 16,
+        shadowOffset: { width: 0, height: 8 },
+        elevation: 12,
+    },
+    moreMenuItem: {
+        flexDirection: "row",
+        alignItems: "center",
+        height: 50,
+        paddingHorizontal: 18,
+    },
+    moreMenuIcon: {
+        width: 26,
+        textAlign: "center",
+    },
+    moreMenuLabel: {
+        fontSize: 16,
         fontWeight: "600",
         color: colors.text,
         marginLeft: 14,

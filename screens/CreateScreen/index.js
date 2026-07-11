@@ -1,8 +1,17 @@
 import { Ionicons } from "@expo/vector-icons";
-import { Image, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+    ActivityIndicator,
+    Image,
+    ScrollView,
+    StyleSheet,
+    Text,
+    View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { AdjustPhotoModal } from "../../components/AdjustPhotoModal";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { FadeSlideIn } from "../../components/FadeSlideIn";
+import { usePhotoToPlan } from "../../hooks/usePhotoToPlan";
 import { colors, radius, shadow } from "../../utils/theme";
 
 const CREATE_ITEMS = [
@@ -20,30 +29,28 @@ const CREATE_ITEMS = [
         image: require("../../assets/create/plan-from-photo.jpg"),
     },
     {
-        key: "room-scan",
-        title: "Room Scan",
-        subtitle: "Turn your real room into a 3D plan",
-        pro: true,
-        image: require("../../assets/create/room-scan.jpg"),
-    },
-    {
         key: "ai-redesign",
         title: "AI Redesign",
         subtitle: "Reimagine any room from a photo",
         image: require("../../assets/create/ai-redesign.jpg"),
     },
-    {
-        key: "design-order",
-        title: "Design Order",
-        subtitle: "A pro designer creates your project",
-        image: require("../../assets/create/design-order.jpg"),
-    },
 ];
 
 export const CreateScreen = ({ navigation }) => {
+    const photo = usePhotoToPlan(navigation);
+
     const handleStart = (key) => {
         if (key === "3d-design") {
             navigation.navigate("FloorPlan");
+            return;
+        }
+        if (key === "plan-from-photo") {
+            // Pick/take a photo and convert it to a diagram right here.
+            photo.start();
+            return;
+        }
+        if (key === "ai-redesign") {
+            navigation.navigate("AiRedesign");
             return;
         }
         // TODO: navigate to the remaining create flows
@@ -110,6 +117,25 @@ export const CreateScreen = ({ navigation }) => {
                     </FadeSlideIn>
                 ))}
             </ScrollView>
+
+            <AdjustPhotoModal
+                visible={photo.pendingAsset !== null}
+                asset={photo.pendingAsset}
+                onCancel={photo.onCropCancel}
+                onDone={photo.onCropDone}
+            />
+
+            {photo.recognizing && (
+                <View style={styles.recognizeOverlay} pointerEvents="auto">
+                    <View style={styles.recognizeCard}>
+                        <ActivityIndicator size="large" color={colors.primary} />
+                        <Text style={styles.recognizeTitle}>Recognizing floor plan…</Text>
+                        <Text style={styles.recognizeSub}>
+                            Detecting walls, doors and windows with AI.
+                        </Text>
+                    </View>
+                </View>
+            )}
         </SafeAreaView>
     );
 };
@@ -118,6 +144,34 @@ const styles = StyleSheet.create({
     safeArea: {
         flex: 1,
         backgroundColor: colors.background,
+    },
+    recognizeOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        backgroundColor: "rgba(15,23,42,0.45)",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 50,
+    },
+    recognizeCard: {
+        backgroundColor: colors.surface,
+        borderRadius: radius.lg,
+        paddingVertical: 28,
+        paddingHorizontal: 32,
+        alignItems: "center",
+        maxWidth: 300,
+        ...shadow.floating,
+    },
+    recognizeTitle: {
+        fontSize: 17,
+        fontWeight: "700",
+        color: colors.text,
+        marginTop: 16,
+    },
+    recognizeSub: {
+        fontSize: 13,
+        color: colors.textMuted,
+        marginTop: 6,
+        textAlign: "center",
     },
     header: {
         paddingHorizontal: 20,

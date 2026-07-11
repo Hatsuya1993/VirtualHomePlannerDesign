@@ -6,13 +6,15 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { GapWarningBanner } from "../../components/GapWarningBanner";
 import {
-    chainRoom,
     collectEndpoints,
     findCornerGroup,
+    openEndpoints,
     snapPoint,
+    wallsHaveGap,
 } from "../../utils/roomGeometry";
 import { colors, radius } from "../../utils/theme";
 
+const GAP_HIGHLIGHT = "#EF4444"; // red marker for the loose wall ends causing a gap
 const GRID = 26; // grid cell size in points (screen space)
 const MIN_WALL = 12; // ignore accidental taps shorter than this (screen space)
 const PICK_RADIUS = 28; // touch radius for grabbing an endpoint (screen space)
@@ -56,8 +58,10 @@ export const DrawWallsScreen = ({ navigation, route }) => {
         }
     }, [route.params?.updatedWalls]);
 
-    const { closed } = chainRoom(walls);
-    const hasGap = walls.length > 0 && !closed;
+    const hasGap = walls.length > 0 && wallsHaveGap(walls);
+    // While warning about a gap, mark the loose wall ends so the user can see
+    // exactly where the room is still open.
+    const gapEnds = warningVisible && hasGap ? openEndpoints(walls) : [];
 
     // Latest values for the persistent PanResponder callbacks.
     const stateRef = useRef({});
@@ -357,6 +361,7 @@ export const DrawWallsScreen = ({ navigation, route }) => {
             <GapWarningBanner
                 visible={warningVisible && hasGap}
                 onDismiss={() => setWarningVisible(false)}
+                message="You need to complete your room. The open ends are marked in red — connect them to close the gap."
             />
 
             {/* Canvas */}
@@ -470,6 +475,34 @@ export const DrawWallsScreen = ({ navigation, route }) => {
                                     strokeWidth={2.5 / transform.s}
                                 />,
                             ])}
+
+                        {/* Gap highlights: mark the loose wall ends causing the
+                            open room, drawn last so they sit above everything. */}
+                        {gapEnds.map((p, i) => (
+                            <G key={`gap${i}`}>
+                                <Circle
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r={18 / transform.s}
+                                    fill={GAP_HIGHLIGHT}
+                                    opacity={0.2}
+                                />
+                                <Circle
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r={11 / transform.s}
+                                    fill="none"
+                                    stroke={GAP_HIGHLIGHT}
+                                    strokeWidth={3.5 / transform.s}
+                                />
+                                <Circle
+                                    cx={p.x}
+                                    cy={p.y}
+                                    r={4 / transform.s}
+                                    fill={GAP_HIGHLIGHT}
+                                />
+                            </G>
+                        ))}
                     </G>
                 </Svg>
             </View>

@@ -37,6 +37,149 @@ export const chainRoom = (walls) => {
     return { polygon: pts, closed };
 };
 
+const GAP_EPS = 14; // content-space tolerance for "this endpoint touches another wall"
+
+// Robust "does the wall layout have a gap" test. Unlike chainRoom's closed
+// flag (which assumes the whole room is one simple loop and every wall is on
+// its boundary), this only asks: does any wall have a loose, dangling end?
+// An endpoint counts as connected if it lands on ANY other wall — either at
+// that wall's own endpoint or partway along it (a T-junction). This means
+// interior/dividing walls no longer trigger a false "gaps in the walls"
+// warning, as long as the room is genuinely sealed.
+export const wallsHaveGap = (walls, eps = GAP_EPS) => {
+    if (walls.length < 3) return true; // can't enclose an area
+    for (let i = 0; i < walls.length; i++) {
+        const w = walls[i];
+        const ends = [
+            { x: w.x1, y: w.y1 },
+            { x: w.x2, y: w.y2 },
+        ];
+        for (const p of ends) {
+            let connected = false;
+            for (let j = 0; j < walls.length && !connected; j++) {
+                if (j === i) continue;
+                const o = walls[j];
+                if (
+                    distanceToSegment(p, { x: o.x1, y: o.y1 }, { x: o.x2, y: o.y2 }) <= eps
+                ) {
+                    connected = true;
+                }
+            }
+            if (!connected) return true; // a dangling end = a gap
+        }
+    }
+    return false;
+};
+
+// Trace the outer boundary polygon of the walls, robust to interior/divider
+// walls and to the greedy chainRoom tracer failing to form one loop. Endpoints
+// are merged into shared nodes; starting from the bottom-most node we walk the
+// outer face by always taking the sharpest right turn (interior stays on the
+// left), which correctly ignores interior/divider walls at any orientation.
+// Returns the boundary points, or null if the walls don't enclose a region.
+export const roomOutline = (walls, eps = GAP_EPS) => {
+    const nodes = [];
+    const nodeOf = (p) => {
+        for (let i = 0; i < nodes.length; i++) {
+            if (Math.hypot(nodes[i].x - p.x, nodes[i].y - p.y) <= eps) return i;
+        }
+        nodes.push({ x: p.x, y: p.y });
+        return nodes.length - 1;
+    };
+    const adj = new Map();
+    const link = (a, b) => {
+        if (!adj.has(a)) adj.set(a, new Set());
+        adj.get(a).add(b);
+    };
+    for (const w of walls) {
+        const a = nodeOf({ x: w.x1, y: w.y1 });
+        const b = nodeOf({ x: w.x2, y: w.y2 });
+        if (a === b) continue;
+        link(a, b);
+        link(b, a);
+    }
+    if (nodes.length < 3) return null;
+
+    // Bottom-most (then left-most) node is guaranteed on the outer boundary.
+    let start = 0;
+    for (let i = 1; i < nodes.length; i++) {
+        if (
+            nodes[i].y > nodes[start].y ||
+            (nodes[i].y === nodes[start].y && nodes[i].x < nodes[start].x)
+        ) {
+            start = i;
+        }
+    }
+    if (!adj.has(start)) return null;
+
+    const vec = (a, b) => ({ x: nodes[b].x - nodes[a].x, y: nodes[b].y - nodes[a].y });
+    // Signed turn from incoming direction `din` to outgoing `dout` (screen
+    // coords, y-down). We always take the sharpest right turn (smallest value),
+    // which hugs the outer boundary with the interior on the left.
+    const turn = (din, dout) =>
+        Math.atan2(din.x * dout.y - din.y * dout.x, din.x * dout.x + din.y * dout.y);
+    const nextFrom = (cur, din, prevNode) => {
+        let best = null;
+        for (const n of adj.get(cur)) {
+            if (n === prevNode) continue;
+            const t = turn(din, vec(cur, n));
+            if (best === null || t < best.t) best = { n, t };
+        }
+        return best;
+    };
+
+    // First step: pretend we arrived travelling in +x (from the left).
+    const first = nextFrom(start, { x: 1, y: 0 }, -1);
+    if (!first) return null;
+    let prev = start;
+    let cur = first.n;
+
+    const outline = [start];
+    let guard = 0;
+    const maxSteps = walls.length * 2 + 6;
+    while (cur !== start && guard++ < maxSteps) {
+        outline.push(cur);
+        const step = nextFrom(cur, vec(prev, cur), prev);
+        if (!step) return null; // dangling end — not a sealed boundary
+        prev = cur;
+        cur = step.n;
+    }
+    if (cur !== start || outline.length < 3) return null;
+    return outline.map((i) => ({ x: nodes[i].x, y: nodes[i].y }));
+};
+
+// The dangling wall endpoints responsible for a gap — the loose ends that
+// don't touch any other wall. Used to highlight exactly where the room is open.
+// Coincident loose ends are de-duplicated so a spot is marked once.
+export const openEndpoints = (walls, eps = GAP_EPS) => {
+    const open = [];
+    for (let i = 0; i < walls.length; i++) {
+        const w = walls[i];
+        const ends = [
+            { x: w.x1, y: w.y1 },
+            { x: w.x2, y: w.y2 },
+        ];
+        for (const p of ends) {
+            let connected = false;
+            for (let j = 0; j < walls.length && !connected; j++) {
+                if (j === i) continue;
+                const o = walls[j];
+                if (
+                    distanceToSegment(p, { x: o.x1, y: o.y1 }, { x: o.x2, y: o.y2 }) <= eps
+                ) {
+                    connected = true;
+                }
+            }
+            if (!connected) open.push(p);
+        }
+    }
+    const uniq = [];
+    for (const p of open) {
+        if (!uniq.some((q) => Math.hypot(q.x - p.x, q.y - p.y) <= eps)) uniq.push(p);
+    }
+    return uniq;
+};
+
 // Shortest distance from point p to the segment a—b.
 const distanceToSegment = (p, a, b) => {
     const dx = b.x - a.x;

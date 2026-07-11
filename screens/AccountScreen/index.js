@@ -1,15 +1,10 @@
 import { Ionicons } from "@expo/vector-icons";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { FadeSlideIn } from "../../components/FadeSlideIn";
+import { useAuth } from "../../context/AuthContext";
 import { colors, radius, shadow } from "../../utils/theme";
-
-const USER = {
-    name: "Muhammad Nur Hazrul",
-    email: "muhammadnurhazrul@gmail.com",
-    isPro: false,
-};
 
 const MENU_ITEMS = [
     {
@@ -58,7 +53,27 @@ const getInitials = (name) =>
         .join("");
 
 export const AccountScreen = () => {
+    const { user, logout } = useAuth();
+    const email = user?.email ?? "";
+    const name = user?.displayName || (email ? email.split("@")[0] : "Your Account");
+    const isPro = false;
+
+    const handleLogout = () => {
+        Alert.alert("Log out", "Are you sure you want to log out?", [
+            { text: "Cancel", style: "cancel" },
+            {
+                text: "Log Out",
+                style: "destructive",
+                onPress: () => logout().catch(() => {}),
+            },
+        ]);
+    };
+
     const handlePress = (key) => {
+        if (key === "logout") {
+            handleLogout();
+            return;
+        }
         // TODO: wire up navigation / actions per item
         console.log("pressed", key);
     };
@@ -77,15 +92,15 @@ export const AccountScreen = () => {
                         <View style={styles.profileRow}>
                             <View style={styles.avatar}>
                                 <Text style={styles.avatarText}>
-                                    {getInitials(USER.name)}
+                                    {getInitials(name)}
                                 </Text>
                             </View>
                             <View style={styles.profileInfo}>
                                 <Text style={styles.name} numberOfLines={1}>
-                                    {USER.name}
+                                    {name}
                                 </Text>
                                 <View style={styles.emailRow}>
-                                    {!USER.isPro && (
+                                    {!isPro && (
                                         <View style={styles.proBadge}>
                                             <Ionicons
                                                 name="star"
@@ -96,7 +111,7 @@ export const AccountScreen = () => {
                                         </View>
                                     )}
                                     <Text style={styles.email} numberOfLines={1}>
-                                        {USER.email}
+                                        {email}
                                     </Text>
                                 </View>
                             </View>
