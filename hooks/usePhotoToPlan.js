@@ -7,6 +7,8 @@ import {
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { recognizeFloorPlan, recognizedToWalls } from "../utils/autoRecognize";
+import { useEntitlements } from "../context/EntitlementsContext";
+import { report } from "../utils/report";
 
 // "Plan from a Photo": pick or take a photo, (optionally crop via a modal), run
 // AI floor-plan recognition, and open Plan Preview with the resulting diagram.
@@ -14,6 +16,7 @@ import { recognizeFloorPlan, recognizedToWalls } from "../utils/autoRecognize";
 // modal and a "recognizing…" overlay.
 export const usePhotoToPlan = (navigation) => {
     const { width } = useWindowDimensions();
+    const { canUseAi, onAiSuccess } = useEntitlements();
     const [pendingAsset, setPendingAsset] = useState(null);
     const [recognizing, setRecognizing] = useState(false);
 
@@ -51,8 +54,12 @@ export const usePhotoToPlan = (navigation) => {
         }
     };
 
-    // Open the Gallery/Camera chooser.
+    // Open the Gallery/Camera chooser (behind the AI paywall).
     const start = () => {
+        if (!canUseAi) {
+            navigation.navigate("Paywall");
+            return;
+        }
         if (Platform.OS === "ios") {
             ActionSheetIOS.showActionSheetWithOptions(
                 {
@@ -85,8 +92,10 @@ export const usePhotoToPlan = (navigation) => {
             if (walls.length < 3) {
                 throw new Error("Couldn't build a room from the detected walls.");
             }
+            onAiSuccess();
             navigation.navigate("PlanPreview", { walls });
         } catch (e) {
+            report(e, { feature: "recognition", source: "plan-from-photo" });
             Alert.alert("Plan from a Photo", String(e?.message ?? e));
         } finally {
             setRecognizing(false);

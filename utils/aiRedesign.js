@@ -90,6 +90,14 @@ export const generateRedesign = async (roomUri, itemUri) => {
 
     if (!res.ok) {
         const detail = await res.text().catch(() => "");
+        if (res.status === 429) {
+            throw new Error(
+                "You've hit Gemini's quota for image generation. The image models are a paid feature with a tiny free-tier limit — enable billing on your Google Cloud project, or wait for the daily quota to reset, then try again."
+            );
+        }
+        if (res.status === 400 && /api key|api_key|invalid/i.test(detail)) {
+            throw new Error("Invalid Gemini API key. Check EXPO_PUBLIC_GEMINI_API_KEY.");
+        }
         throw new Error(`Image generation failed (${res.status}). ${detail.slice(0, 200)}`);
     }
 

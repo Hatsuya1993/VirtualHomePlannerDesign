@@ -1,9 +1,29 @@
+import * as Sentry from '@sentry/react-native';
+import { vexo } from 'vexo-analytics';
 import { NavigationContainer } from '@react-navigation/native';
 import { ActivityIndicator, View } from 'react-native';
 import RootNavigator from './navigation';
 import { UnitsProvider } from './context/UnitsContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { EntitlementsProvider } from './context/EntitlementsContext';
 import { colors } from './utils/theme';
+
+// Sentry (crash/error monitoring) — only initialized when a DSN is provided.
+const SENTRY_DSN = process.env.EXPO_PUBLIC_SENTRY_DSN;
+if (SENTRY_DSN) {
+  Sentry.init({
+    dsn: SENTRY_DSN,
+    // Turn on only in a small % for perf tracing; keep errors always on.
+    tracesSampleRate: 0.2,
+    sendDefaultPii: false,
+  });
+}
+
+// Vexo (product analytics) — auto-tracks screens/sessions once initialized.
+const VEXO_API_KEY = process.env.EXPO_PUBLIC_VEXO_API_KEY;
+if (VEXO_API_KEY) {
+  vexo(VEXO_API_KEY);
+}
 
 // Wait for Firebase to report the persisted auth state before rendering the
 // navigator, so we don't flash onboarding to an already-signed-in user.
@@ -23,12 +43,16 @@ function Root() {
   );
 }
 
-export default function App() {
+function App() {
   return (
     <AuthProvider>
-      <UnitsProvider>
-        <Root />
-      </UnitsProvider>
+      <EntitlementsProvider>
+        <UnitsProvider>
+          <Root />
+        </UnitsProvider>
+      </EntitlementsProvider>
     </AuthProvider>
   );
 }
+
+export default Sentry.wrap(App);

@@ -17,6 +17,7 @@ import { auth } from "./firebase";
 let googleConfigured = false;
 const ensureGoogleConfigured = () => {
     const webClientId = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
+    const iosClientId = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID;
     if (!webClientId) {
         throw new Error(
             "Google sign-in isn't configured. Set EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID in .env."
@@ -24,8 +25,10 @@ const ensureGoogleConfigured = () => {
     }
     if (!googleConfigured) {
         // webClientId must be the Firebase project's *Web* OAuth client ID — it's
-        // the audience Firebase expects on the returned ID token.
-        GoogleSignin.configure({ webClientId });
+        // the audience Firebase expects on the returned ID token. iosClientId is
+        // required on iOS (the native SDK can't find it without a
+        // GoogleService-Info.plist); it's ignored on Android.
+        GoogleSignin.configure({ webClientId, iosClientId });
         googleConfigured = true;
     }
 };

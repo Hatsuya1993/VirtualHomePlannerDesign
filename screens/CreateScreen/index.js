@@ -25,7 +25,6 @@ const CREATE_ITEMS = [
         key: "plan-from-photo",
         title: "Plan from a Photo",
         subtitle: "Convert any floor plan into 3D",
-        badge: "AI",
         image: require("../../assets/create/plan-from-photo.jpg"),
     },
     {

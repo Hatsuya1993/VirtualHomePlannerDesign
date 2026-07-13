@@ -1,5 +1,6 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { getAuth, getReactNativePersistence, initializeAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // Firebase web config — paste yours from the Firebase console (Project settings
@@ -31,5 +32,8 @@ try {
 } catch {
     auth = getAuth(app);
 }
+
+// Firestore holds the "reserved" (deleted-account) email hashes.
+export const db = getFirestore(app);
 
 export { auth };

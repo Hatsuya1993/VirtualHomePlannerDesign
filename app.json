@@ -13,7 +13,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#4644C0",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -40,7 +40,7 @@
       [
         "@react-native-google-signin/google-signin",
         {
-          "iosUrlScheme": "com.googleusercontent.apps.638157894329-fbae48fuvo98if3135u5vquvej38ivd8"
+          "iosUrlScheme": "com.googleusercontent.apps.933172065693-g0h8lfkal87jfgbneith3dmophks796h"
         }
       ],
       [
@@ -49,6 +49,23 @@
           "ios": {
             "useFrameworks": "static"
           }
+        }
+      ],
+      [
+        "@sentry/react-native/expo",
+        {
+          "url": "https://sentry.io/",
+          "project": "room-planner-home-3d-design",
+          "organization": "muhammadnurhazrul"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#F6F7FB"
         }
       ]
     ],

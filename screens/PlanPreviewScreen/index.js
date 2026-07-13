@@ -1,6 +1,17 @@
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import { useEffect, useRef, useState } from "react";
-import { Alert, Pressable, Share, StyleSheet, Text, View } from "react-native";
+import {
+    ActivityIndicator,
+    Alert,
+    Linking,
+    Platform,
+    Pressable,
+    Share,
+    StyleSheet,
+    Text,
+    View,
+} from "react-native";
+import * as StoreReview from "expo-store-review";
 import { File, Paths } from "expo-file-system";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
@@ -34,6 +45,9 @@ import {
     wallsHaveGap,
 } from "../../utils/roomGeometry";
 import { buildPlanHtml, buildShareText, computeStats } from "../../utils/planStats";
+import { useAuth } from "../../context/AuthContext";
+import { renameDesign, saveDesign, updateDesign } from "../../utils/designs";
+import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
 const WALL_COLOR = "#4C7CA8";
@@ -181,7 +195,12 @@ const doorSwing = (w, door) => {
 // corner knobs, over the faded source photo.
 export const PlanPreviewScreen = ({ navigation, route }) => {
     const imageUri = route.params?.imageUri;
+    const { user } = useAuth();
     const [walls, setWalls] = useState(route.params?.walls ?? []);
+    // When opened from an existing saved design, re-saving updates it in place.
+    const [savedId, setSavedId] = useState(route.params?.designId ?? null);
+    const [saving, setSaving] = useState(false);
+    const [name, setName] = useState(route.params?.designName || "Untitled plan");
     const [canvas, setCanvas] = useState({ w: 0, h: 0 });
     const [selectedWall, setSelectedWall] = useState(null);
     const [sizeSheetVisible, setSizeSheetVisible] = useState(false);
@@ -306,6 +325,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 return;
             }
         } catch (e) {
+            report(e, { feature: "share", action: key });
             Alert.alert("Something went wrong", String(e?.message ?? e));
         }
     };
@@ -574,6 +594,11 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     };
 
     const { transform, panHandlers, fitTo } = usePinchPanZoom({
+        // Allow zooming out far enough to fit large imported/AI plans on screen
+        // (a whole-home plan can be ~2000px wide, needing a scale well below the
+        // default 0.5 floor).
+        minScale: 0.1,
+        maxScale: 8,
         onTap: handleTap,
         hitTest: hitTestHandle,
         onDragStart: handleDragStart,
@@ -819,6 +844,60 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         );
     };
 
+    const handleSave = async () => {
+        if (!user) {
+            Alert.alert("Sign in required", "Please sign in to save your design.");
+            return;
+        }
+        if (walls.length === 0) {
+            Alert.alert("Nothing to save", "Draw some walls first.");
+            return;
+        }
+        setSaving(true);
+        try {
+            if (savedId) {
+                await updateDesign(user.uid, savedId, { walls, name });
+            } else {
+                const id = await saveDesign(user.uid, { walls, name });
+                setSavedId(id);
+            }
+            Alert.alert("Saved", "Your design is in My Designs.");
+        } catch (e) {
+            report(e, { feature: "save-design" });
+            Alert.alert("Couldn't save", e?.message ?? "Please try again.");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    // Show/edit the design title. Renames the saved doc immediately if it exists;
+    // otherwise the new name is used the next time you Save.
+    const applyRename = async (text) => {
+        const next = (text || "").trim();
+        if (!next || next === name) return;
+        setName(next);
+        if (savedId && user) {
+            try {
+                await renameDesign(user.uid, savedId, next);
+            } catch {
+                // ignore — the local title still updates
+            }
+        }
+    };
+    const handleRename = () => {
+        if (Platform.OS !== "ios") return; // Alert.prompt is iOS-only
+        Alert.prompt(
+            "Rename design",
+            "Enter a title for this plan.",
+            [
+                { text: "Cancel", style: "cancel" },
+                { text: "Save", onPress: applyRename },
+            ],
+            "plain-text",
+            name === "Untitled plan" ? "" : name
+        );
+    };
+
     let planks = [];
     if (floorPolygon) {
         const xs = floorPolygon.map((p) => p.x);
@@ -842,6 +921,27 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
 
     const todo = (what) => () => console.log("TODO:", what);
 
+    const handleMoreAction = (key) => {
+        setMoreMenuVisible(false);
+        if (key === "measure") {
+            navigation.navigate("Measurements", { walls });
+        } else if (key === "upgrade") {
+            navigation.navigate("Paywall");
+        } else if (key === "love") {
+            StoreReview.hasAction()
+                .then((a) => a && StoreReview.requestReview())
+                .catch(() => {});
+        } else if (key === "help") {
+            Linking.openURL(
+                `mailto:biztech755@gmail.com?subject=${encodeURIComponent(
+                    "Virtual Home Planner — Help & Feedback"
+                )}`
+            ).catch(() =>
+                Alert.alert("Help & Feedback", "Email us at biztech755@gmail.com")
+            );
+        }
+    };
+
     return (
         <SafeAreaView style={styles.safeArea} edges={["top"]}>
             {/* Header */}
@@ -853,6 +953,23 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                     hitSlop={8}
                 >
                     <Ionicons name="close" size={26} color={colors.text} />
+                </AnimatedPressable>
+
+                <AnimatedPressable
+                    onPress={handleRename}
+                    scaleTo={0.96}
+                    style={styles.titleButton}
+                    hitSlop={6}
+                >
+                    <Text style={styles.titleText} numberOfLines={1}>
+                        {name}
+                    </Text>
+                    <Ionicons
+                        name="pencil"
+                        size={13}
+                        color={colors.textMuted}
+                        style={styles.titlePencil}
+                    />
                 </AnimatedPressable>
 
                 <View style={styles.headerRight}>
@@ -924,14 +1041,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                             {MORE_ACTIONS.map((action) => (
                                 <AnimatedPressable
                                     key={action.key}
-                                    onPress={() => {
-                                        setMoreMenuVisible(false);
-                                        if (action.key === "measure") {
-                                            navigation.navigate("Measurements", { walls });
-                                        } else {
-                                            todo(action.key)();
-                                        }
-                                    }}
+                                    onPress={() => handleMoreAction(action.key)}
                                     scaleTo={0.97}
                                     style={styles.moreMenuItem}
                                 >
@@ -1376,6 +1486,20 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 </AnimatedPressable>
 
                 <AnimatedPressable
+                    onPress={handleSave}
+                    disabled={saving}
+                    scaleTo={0.9}
+                    style={styles.tool}
+                >
+                    {saving ? (
+                        <ActivityIndicator color={colors.text} />
+                    ) : (
+                        <Ionicons name="save-outline" size={25} color={colors.text} />
+                    )}
+                    <Text style={styles.toolLabel}>Save</Text>
+                </AnimatedPressable>
+
+                <AnimatedPressable
                     onPress={() =>
                         navigation.navigate("DrawWalls", {
                             updatedWalls: walls,
@@ -1435,6 +1559,22 @@ const styles = StyleSheet.create({
     },
     headerRight: {
         flexDirection: "row",
+    },
+    titleButton: {
+        flex: 1,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        marginHorizontal: 8,
+    },
+    titleText: {
+        fontSize: 15,
+        fontWeight: "700",
+        color: colors.text,
+        flexShrink: 1,
+    },
+    titlePencil: {
+        marginLeft: 5,
     },
     iconButton: {
         paddingHorizontal: 9,

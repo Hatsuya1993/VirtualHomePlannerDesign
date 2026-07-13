@@ -22,6 +22,7 @@ import {
     signInWithApple,
     signInWithGoogle,
 } from "../../utils/socialAuth";
+import { reportAuth } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
 // Map common Firebase auth error codes to friendly messages.
@@ -50,7 +51,7 @@ const friendlyError = (e) => {
 // One screen serves both Register and Login, driven by route params.mode.
 export const AuthScreen = ({ navigation, route }) => {
     const isLogin = route.params?.mode === "login";
-    const { register, login } = useAuth();
+    const { register, login, resetPassword } = useAuth();
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [busy, setBusy] = useState(false);
@@ -78,6 +79,7 @@ export const AuthScreen = ({ navigation, route }) => {
             if (isLogin) await login(email, password);
             else await register(email, password);
         } catch (e) {
+            reportAuth(e, { feature: isLogin ? "login" : "register" });
             Alert.alert(isLogin ? "Login failed" : "Sign up failed", friendlyError(e));
         } finally {
             setBusy(false);
@@ -95,6 +97,7 @@ export const AuthScreen = ({ navigation, route }) => {
             await fn(); // success flips into the app via onAuthStateChanged
         } catch (e) {
             if (!isCancel(e)) {
+                reportAuth(e, { feature: `social-${label.toLowerCase()}` });
                 Alert.alert(`${label} sign-in failed`, friendlyError(e));
             }
         } finally {
@@ -103,6 +106,25 @@ export const AuthScreen = ({ navigation, route }) => {
     };
     const handleGoogle = () => runSocial(signInWithGoogle, isGoogleCancel, "Google");
     const handleApple = () => runSocial(signInWithApple, isAppleCancel, "Apple");
+
+    const handleForgotPassword = async () => {
+        if (!email.trim()) {
+            Alert.alert(
+                "Reset password",
+                "Enter your email above first, then tap Forgot password."
+            );
+            return;
+        }
+        try {
+            await resetPassword(email);
+            Alert.alert(
+                "Check your email",
+                `We sent a password reset link to ${email.trim()}.`
+            );
+        } catch (e) {
+            Alert.alert("Couldn't send reset", friendlyError(e));
+        }
+    };
 
     return (
         <SafeAreaView style={styles.safeArea} edges={["top"]}>
@@ -161,7 +183,7 @@ export const AuthScreen = ({ navigation, route }) => {
 
                     {isLogin && (
                         <AnimatedPressable
-                            onPress={() => {}}
+                            onPress={handleForgotPassword}
                             scaleTo={0.96}
                             style={styles.forgot}
                             hitSlop={6}

@@ -12,11 +12,14 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Sharing from "expo-sharing";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
+import { useEntitlements } from "../../context/EntitlementsContext";
 import { chooseImage } from "../../utils/imagePick";
 import { generateRedesign } from "../../utils/aiRedesign";
+import { report } from "../../utils/report";
 import { colors, radius, shadow } from "../../utils/theme";
 
 export const AiRedesignScreen = ({ navigation }) => {
+    const { canUseAi, onAiSuccess } = useEntitlements();
     const [room, setRoom] = useState(null);
     const [item, setItem] = useState(null);
     const [generating, setGenerating] = useState(false);
@@ -33,11 +36,17 @@ export const AiRedesignScreen = ({ navigation }) => {
 
     const generate = async () => {
         if (!room || !item) return;
+        if (!canUseAi) {
+            navigation.navigate("Paywall");
+            return;
+        }
         setGenerating(true);
         try {
             const out = await generateRedesign(room, item);
             setResult(out.uri);
+            onAiSuccess();
         } catch (e) {
+            report(e, { feature: "ai-redesign" });
             Alert.alert("AI Redesign", String(e?.message ?? e));
         } finally {
             setGenerating(false);

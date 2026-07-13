@@ -1,9 +1,21 @@
 import { Ionicons } from "@expo/vector-icons";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+    Alert,
+    Linking,
+    Platform,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import * as StoreReview from "expo-store-review";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { FadeSlideIn } from "../../components/FadeSlideIn";
 import { useAuth } from "../../context/AuthContext";
+import { useEntitlements, FREE_AI_TRIES } from "../../context/EntitlementsContext";
+import { reportAuth } from "../../utils/report";
 import { colors, radius, shadow } from "../../utils/theme";
 
 const MENU_ITEMS = [
@@ -52,11 +64,13 @@ const getInitials = (name) =>
         .map((part) => part[0].toUpperCase())
         .join("");
 
-export const AccountScreen = () => {
-    const { user, logout } = useAuth();
+export const AccountScreen = ({ navigation }) => {
+    const { user, logout, deleteAccount } = useAuth();
+    const { pro, aiTriesLeft, purchasesAvailable, restore } = useEntitlements();
     const email = user?.email ?? "";
     const name = user?.displayName || (email ? email.split("@")[0] : "Your Account");
-    const isPro = false;
+    const isPro = pro;
+    const providerId = user?.providerData?.[0]?.providerId;
 
     const handleLogout = () => {
         Alert.alert("Log out", "Are you sure you want to log out?", [
@@ -69,9 +83,138 @@ export const AccountScreen = () => {
         ]);
     };
 
+    const runDelete = async (password) => {
+        try {
+            await deleteAccount({ password });
+            // onAuthStateChanged flips the app back to the Welcome flow.
+        } catch (e) {
+            if (e.code === "app/needs-password") {
+                Alert.alert("Password needed", "Please try again and enter your password.");
+            } else if (e.code === "auth/requires-recent-login") {
+                Alert.alert(
+                    "Re-login required",
+                    "For your security, log out and log back in, then delete your account."
+                );
+            } else {
+                reportAuth(e, { feature: "delete-account" });
+                Alert.alert("Couldn't delete account", e?.message ?? "Please try again.");
+            }
+        }
+    };
+
+    // Email/password accounts must re-enter their password to confirm.
+    const confirmDelete = () => {
+        if (providerId === "password" && Platform.OS === "ios") {
+            Alert.prompt(
+                "Confirm password",
+                "Enter your password to permanently delete your account.",
+                [
+                    { text: "Cancel", style: "cancel" },
+                    {
+                        text: "Delete",
+                        style: "destructive",
+                        onPress: (password) => runDelete(password),
+                    },
+                ],
+                "secure-text"
+            );
+        } else {
+            runDelete();
+        }
+    };
+
+    const handleDelete = () => {
+        Alert.alert(
+            "Delete account",
+            "This permanently deletes your account and all your designs. To prevent abuse, this email can't be used to sign up again. This can't be undone.",
+            [
+                { text: "Cancel", style: "cancel" },
+                { text: "Delete", style: "destructive", onPress: confirmDelete },
+            ]
+        );
+    };
+
+    const handleRate = async () => {
+        try {
+            if (await StoreReview.hasAction()) {
+                // Shows the native in-app rating prompt (or opens the store page).
+                await StoreReview.requestReview();
+            } else {
+                Alert.alert(
+                    "Rate us",
+                    "Ratings will be available once the app is on the App Store."
+                );
+            }
+        } catch {
+            Alert.alert("Rate us", "Couldn't open the rating prompt right now.");
+        }
+    };
+
+    const handleContact = () => {
+        const url = `mailto:biztech755@gmail.com?subject=${encodeURIComponent(
+            "Virtual Home Planner — Support"
+        )}`;
+        Linking.openURL(url).catch(() =>
+            Alert.alert("Contact us", "Email us at biztech755@gmail.com")
+        );
+    };
+
+    const handleRestore = async () => {
+        if (!purchasesAvailable) {
+            // No RevenueCat configured — entitlement syncs automatically via account.
+            Alert.alert(
+                "Restore Purchases",
+                pro
+                    ? "Your Pro subscription is active."
+                    : "No active subscription found on this account.",
+                [
+                    { text: "OK", style: "cancel" },
+                    { text: "Go Pro", onPress: () => navigation.navigate("Paywall") },
+                ]
+            );
+            return;
+        }
+        try {
+            const ok = await restore();
+            Alert.alert(
+                ok ? "Restored" : "No purchases found",
+                ok
+                    ? "Your Pro subscription is active."
+                    : "We couldn't find an active subscription on this account."
+            );
+        } catch (e) {
+            reportAuth(e, { feature: "restore" });
+            Alert.alert("Restore failed", e?.message ?? "Please try again.");
+        }
+    };
+
     const handlePress = (key) => {
+        if (key === "restore") {
+            handleRestore();
+            return;
+        }
         if (key === "logout") {
             handleLogout();
+            return;
+        }
+        if (key === "delete") {
+            handleDelete();
+            return;
+        }
+        if (key === "rate") {
+            handleRate();
+            return;
+        }
+        if (key === "privacy") {
+            navigation.navigate("Legal", { doc: "privacy" });
+            return;
+        }
+        if (key === "terms") {
+            navigation.navigate("Legal", { doc: "terms" });
+            return;
+        }
+        if (key === "contact") {
+            handleContact();
             return;
         }
         // TODO: wire up navigation / actions per item
@@ -117,6 +260,42 @@ export const AccountScreen = () => {
                             </View>
                         </View>
                     </View>
+                </FadeSlideIn>
+
+                {/* Pro / upgrade */}
+                <FadeSlideIn delay={60}>
+                    <AnimatedPressable
+                        onPress={() => navigation.navigate("Paywall")}
+                        scaleTo={0.98}
+                        style={[styles.proCard, isPro && styles.proCardActive]}
+                    >
+                        <View style={styles.proIcon}>
+                            <Ionicons
+                                name={isPro ? "checkmark-circle" : "sparkles"}
+                                size={22}
+                                color="#FFFFFF"
+                            />
+                        </View>
+                        <View style={styles.proTextWrap}>
+                            <Text style={styles.proTitle}>
+                                {isPro ? "Pro member" : "Upgrade to Pro"}
+                            </Text>
+                            <Text style={styles.proSub}>
+                                {isPro
+                                    ? "You have unlimited AI."
+                                    : `${aiTriesLeft} of ${FREE_AI_TRIES} free AI ${
+                                          aiTriesLeft === 1 ? "try" : "tries"
+                                      } left`}
+                            </Text>
+                        </View>
+                        {!isPro && (
+                            <Ionicons
+                                name="chevron-forward"
+                                size={20}
+                                color="rgba(255,255,255,0.9)"
+                            />
+                        )}
+                    </AnimatedPressable>
                 </FadeSlideIn>
 
                 {/* Settings list */}
@@ -206,6 +385,34 @@ const styles = StyleSheet.create({
         marginBottom: 20,
         overflow: "hidden",
         ...shadow.card,
+    },
+    proCard: {
+        flexDirection: "row",
+        alignItems: "center",
+        backgroundColor: colors.primary,
+        borderRadius: radius.lg,
+        padding: 16,
+        marginBottom: 20,
+        ...shadow.card,
+    },
+    proCardActive: {
+        backgroundColor: colors.success,
+    },
+    proIcon: {
+        width: 44,
+        height: 44,
+        borderRadius: 12,
+        backgroundColor: "rgba(255,255,255,0.22)",
+        alignItems: "center",
+        justifyContent: "center",
+        marginRight: 14,
+    },
+    proTextWrap: { flex: 1 },
+    proTitle: { fontSize: 17, fontWeight: "800", color: "#FFFFFF" },
+    proSub: {
+        fontSize: 13,
+        color: "rgba(255,255,255,0.9)",
+        marginTop: 2,
     },
     profileRow: {
         flexDirection: "row",

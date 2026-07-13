@@ -1,38 +1,37 @@
 import { Ionicons } from "@expo/vector-icons";
-import { Image, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Alert, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { FadeSlideIn } from "../../components/FadeSlideIn";
+import { PlanMiniature } from "../../components/PlanMiniature";
+import { useAuth } from "../../context/AuthContext";
+import { useEntitlements } from "../../context/EntitlementsContext";
+import { deleteDesign, renameDesign, subscribeDesigns } from "../../utils/designs";
+import { report } from "../../utils/report";
 import { colors, radius, shadow } from "../../utils/theme";
 
-// Saved designs — replace with data from storage / backend.
-const DESIGNS = [
-    {
-        id: "1",
-        title: "Floor Plan Project",
-        updatedAt: "an hour ago",
-        synced: false,
-        thumbnail: null, // e.g. require("../../assets/...") or { uri }
-    },
-];
+const formatWhen = (ts) => {
+    const d = ts?.toDate ? ts.toDate() : null;
+    if (!d) return "Just now";
+    const diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 60) return "Just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+    return d.toLocaleDateString();
+};
 
-// Rendered/exported photos of designs. Empty for now.
-const GALLERY = [];
-
-const MAX_PREVIEW = 3;
-
-const DesignCard = ({ design, onPress }) => (
+const DesignCard = ({ design, onOpen, onLongPress }) => (
     <AnimatedPressable
-        onPress={() => onPress(design.id)}
+        onPress={() => onOpen(design)}
+        onLongPress={() => onLongPress(design)}
+        delayLongPress={300}
         style={[styles.gridCell, styles.designCard]}
     >
         <View style={styles.thumb}>
-            {design.thumbnail ? (
-                <Image
-                    source={design.thumbnail}
-                    style={styles.thumbImage}
-                    resizeMode="cover"
-                />
+            {design.walls?.length ? (
+                <PlanMiniature walls={design.walls} />
             ) : (
                 <Ionicons name="image-outline" size={32} color={colors.textFaint} />
             )}
@@ -40,29 +39,93 @@ const DesignCard = ({ design, onPress }) => (
         <View style={styles.cardFooter}>
             <View style={styles.cardText}>
                 <Text style={styles.cardTitle} numberOfLines={1}>
-                    {design.title}
+                    {design.name || "Untitled plan"}
                 </Text>
                 <Text style={styles.cardMeta} numberOfLines={1}>
-                    {design.updatedAt}
+                    {formatWhen(design.updatedAt)}
                 </Text>
             </View>
-            <Ionicons
-                name={design.synced ? "cloud-done-outline" : "cloud-offline-outline"}
-                size={18}
-                color={design.synced ? colors.success : colors.textFaint}
-            />
+            <Ionicons name="cloud-done-outline" size={18} color={colors.success} />
         </View>
     </AnimatedPressable>
 );
 
-export const DesignsScreen = () => {
-    const preview = DESIGNS.slice(0, MAX_PREVIEW);
+export const DesignsScreen = ({ navigation }) => {
+    const { user } = useAuth();
+    const { pro, loading, promptedRef, markPrompted } = useEntitlements();
+    const [designs, setDesigns] = useState([]);
 
-    const handleOpen = (id) => console.log("open design", id);
-    const handleShowAll = () => console.log("show all designs");
-    const handleSync = () => console.log("sync now");
-    const handleGallerySeeAll = () => console.log("gallery see all");
-    const handleSignIn = () => console.log("sign in");
+    useEffect(() => {
+        if (!user) return undefined;
+        return subscribeDesigns(user.uid, setDesigns, () => {});
+    }, [user]);
+
+    // Show the paywall once, shortly after login, for non-Pro users.
+    useEffect(() => {
+        if (loading || pro || promptedRef.current) return;
+        markPrompted();
+        navigation.navigate("Paywall");
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [loading, pro]);
+
+    const openDesign = (design) => {
+        navigation.navigate("PlanPreview", {
+            walls: design.walls,
+            designId: design.id,
+            designName: design.name,
+        });
+    };
+
+    const confirmDelete = (design) => {
+        Alert.alert(
+            "Delete design",
+            `Delete "${design.name || "Untitled plan"}"? This can't be undone.`,
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Delete",
+                    style: "destructive",
+                    onPress: () =>
+                        deleteDesign(user.uid, design.id).catch((e) =>
+                            report(e, { feature: "delete-design" })
+                        ),
+                },
+            ]
+        );
+    };
+
+    const promptRename = (design) => {
+        if (Platform.OS !== "ios") return; // Alert.prompt is iOS-only
+        Alert.prompt(
+            "Rename design",
+            "Enter a new title.",
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Save",
+                    onPress: (text) => {
+                        const next = (text || "").trim();
+                        if (next)
+                            renameDesign(user.uid, design.id, next).catch((e) =>
+                                report(e, { feature: "rename-design" })
+                            );
+                    },
+                },
+            ],
+            "plain-text",
+            design.name === "Untitled plan" ? "" : design.name || ""
+        );
+    };
+
+    // Long-press → edit, rename or delete.
+    const showOptions = (design) => {
+        Alert.alert(design.name || "Untitled plan", "What would you like to do?", [
+            { text: "Edit", onPress: () => openDesign(design) },
+            { text: "Rename", onPress: () => promptRename(design) },
+            { text: "Delete", style: "destructive", onPress: () => confirmDelete(design) },
+            { text: "Cancel", style: "cancel" },
+        ]);
+    };
 
     return (
         <SafeAreaView style={styles.safeArea} edges={["top"]}>
@@ -74,109 +137,37 @@ export const DesignsScreen = () => {
                 contentContainerStyle={styles.content}
                 showsVerticalScrollIndicator={false}
             >
-                {/* Sync banner */}
-                <FadeSlideIn>
-                    <View style={styles.banner}>
-                        <Ionicons
-                            name="cloud-offline-outline"
-                            size={20}
-                            color={colors.danger}
-                        />
-                        <Text style={styles.bannerText}>
-                            Don't lose your progress
-                        </Text>
-                        <AnimatedPressable
-                            onPress={handleSync}
-                            scaleTo={0.92}
-                            style={styles.bannerButton}
-                        >
-                            <Text style={styles.bannerButtonText}>Sync now</Text>
-                        </AnimatedPressable>
-                    </View>
-                </FadeSlideIn>
-
-                {/* Saved designs grid */}
-                <View style={styles.grid}>
-                    {preview.map((design, index) => (
-                        <FadeSlideIn
-                            key={design.id}
-                            delay={100 + index * 90}
-                            style={styles.gridSlot}
-                        >
-                            <DesignCard design={design} onPress={handleOpen} />
-                        </FadeSlideIn>
-                    ))}
-
-                    {DESIGNS.length > 0 && (
-                        <FadeSlideIn
-                            delay={100 + preview.length * 90}
-                            style={styles.gridSlot}
-                        >
-                            <AnimatedPressable
-                                onPress={handleShowAll}
-                                style={[styles.gridCell, styles.showAll]}
-                            >
-                                <View style={styles.showAllInner}>
-                                    <Text style={styles.showAllText}>
-                                        Show all ({DESIGNS.length})
-                                    </Text>
-                                    <Ionicons
-                                        name="arrow-forward"
-                                        size={18}
-                                        color={colors.textMuted}
-                                    />
-                                </View>
-                            </AnimatedPressable>
-                        </FadeSlideIn>
-                    )}
-                </View>
-
-                {/* Gallery */}
-                <FadeSlideIn delay={300}>
-                    <View style={styles.sectionHeader}>
-                        <Text style={styles.sectionTitle}>Gallery</Text>
-                        <AnimatedPressable
-                            onPress={handleGallerySeeAll}
-                            style={styles.seeAll}
-                        >
-                            <Text style={styles.seeAllText}>See all</Text>
-                            <Ionicons
-                                name="chevron-forward"
-                                size={16}
-                                color={colors.textMuted}
-                            />
-                        </AnimatedPressable>
-                    </View>
-
-                    {GALLERY.length === 0 ? (
+                {designs.length === 0 ? (
+                    <FadeSlideIn>
                         <View style={styles.emptyState}>
-                            <Text style={styles.emptyText}>No ready photos yet</Text>
-                            <AnimatedPressable
-                                onPress={handleSignIn}
-                                scaleTo={0.94}
-                                style={styles.signInButton}
+                            <Ionicons
+                                name="albums-outline"
+                                size={44}
+                                color={colors.textFaint}
+                            />
+                            <Text style={styles.emptyText}>No saved designs yet</Text>
+                            <Text style={styles.emptySub}>
+                                Open a plan and tap Save to keep it here.
+                            </Text>
+                        </View>
+                    </FadeSlideIn>
+                ) : (
+                    <View style={styles.grid}>
+                        {designs.map((design, index) => (
+                            <FadeSlideIn
+                                key={design.id}
+                                delay={index * 60}
+                                style={styles.gridSlot}
                             >
-                                <Text style={styles.signInText}>Sign in</Text>
-                            </AnimatedPressable>
-                        </View>
-                    ) : (
-                        <View style={styles.grid}>
-                            {GALLERY.map((photo) => (
-                                <View key={photo.id} style={styles.gridSlot}>
-                                    <View style={[styles.gridCell, styles.designCard]}>
-                                        <View style={styles.thumb}>
-                                            <Image
-                                                source={photo.image}
-                                                style={styles.thumbImage}
-                                                resizeMode="cover"
-                                            />
-                                        </View>
-                                    </View>
-                                </View>
-                            ))}
-                        </View>
-                    )}
-                </FadeSlideIn>
+                                <DesignCard
+                                    design={design}
+                                    onOpen={openDesign}
+                                    onLongPress={showOptions}
+                                />
+                            </FadeSlideIn>
+                        ))}
+                    </View>
+                )}
             </ScrollView>
         </SafeAreaView>
     );
@@ -202,33 +193,6 @@ const styles = StyleSheet.create({
         paddingTop: 8,
         paddingBottom: 40,
     },
-    banner: {
-        flexDirection: "row",
-        alignItems: "center",
-        backgroundColor: colors.dangerSoft,
-        borderRadius: radius.md,
-        paddingHorizontal: 14,
-        paddingVertical: 12,
-        marginBottom: 20,
-    },
-    bannerText: {
-        flex: 1,
-        fontSize: 15,
-        fontWeight: "600",
-        color: colors.text,
-        marginLeft: 10,
-    },
-    bannerButton: {
-        backgroundColor: colors.dark,
-        borderRadius: radius.pill,
-        paddingHorizontal: 14,
-        paddingVertical: 8,
-    },
-    bannerButtonText: {
-        color: "#FFFFFF",
-        fontSize: 13,
-        fontWeight: "700",
-    },
     grid: {
         flexDirection: "row",
         flexWrap: "wrap",
@@ -253,10 +217,6 @@ const styles = StyleSheet.create({
         alignItems: "center",
         justifyContent: "center",
     },
-    thumbImage: {
-        width: "100%",
-        height: "100%",
-    },
     cardFooter: {
         flexDirection: "row",
         alignItems: "center",
@@ -277,64 +237,21 @@ const styles = StyleSheet.create({
         color: colors.textMuted,
         marginTop: 2,
     },
-    showAll: {
-        aspectRatio: 0.83,
-        backgroundColor: colors.surfaceAlt,
-        borderRadius: radius.md,
-        alignItems: "center",
-        justifyContent: "center",
-    },
-    showAllInner: {
-        flexDirection: "row",
-        alignItems: "center",
-    },
-    showAllText: {
-        fontSize: 15,
-        fontWeight: "600",
-        color: colors.textMuted,
-        marginRight: 6,
-    },
-    sectionHeader: {
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        marginTop: 4,
-        marginBottom: 16,
-    },
-    sectionTitle: {
-        fontSize: 24,
-        fontWeight: "800",
-        color: colors.text,
-    },
-    seeAll: {
-        flexDirection: "row",
-        alignItems: "center",
-    },
-    seeAllText: {
-        fontSize: 15,
-        fontWeight: "600",
-        color: colors.textMuted,
-        marginRight: 2,
-    },
     emptyState: {
         alignItems: "center",
         justifyContent: "center",
-        paddingVertical: 40,
+        paddingVertical: 80,
     },
     emptyText: {
-        fontSize: 16,
-        color: colors.textMuted,
-        marginBottom: 20,
-    },
-    signInButton: {
-        backgroundColor: colors.primarySoft,
-        borderRadius: radius.pill,
-        paddingHorizontal: 28,
-        paddingVertical: 12,
-    },
-    signInText: {
-        color: colors.primary,
-        fontSize: 16,
+        fontSize: 18,
         fontWeight: "700",
+        color: colors.text,
+        marginTop: 16,
+    },
+    emptySub: {
+        fontSize: 14,
+        color: colors.textMuted,
+        marginTop: 6,
+        textAlign: "center",
     },
 });

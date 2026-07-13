@@ -13,6 +13,8 @@ import { PlanPreviewScreen } from "../screens/PlanPreviewScreen";
 import { Room3DScreen } from "../screens/Room3DScreen";
 import { MeasurementsScreen } from "../screens/MeasurementsScreen";
 import { AiRedesignScreen } from "../screens/AiRedesignScreen";
+import { PaywallScreen } from "../screens/PaywallScreen";
+import { LegalScreen } from "../screens/LegalScreen";
 import { useAuth } from "../context/AuthContext";
 import { colors, shadow } from "../utils/theme";
 
@@ -97,6 +99,16 @@ const RootNavigator = () => {
                     <Stack.Screen
                         name="AiRedesign"
                         component={AiRedesignScreen}
+                        options={{ animation: "slide_from_right" }}
+                    />
+                    <Stack.Screen
+                        name="Paywall"
+                        component={PaywallScreen}
+                        options={{ presentation: "modal", animation: "slide_from_bottom" }}
+                    />
+                    <Stack.Screen
+                        name="Legal"
+                        component={LegalScreen}
                         options={{ animation: "slide_from_right" }}
                     />
                 </>

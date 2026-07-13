@@ -15,6 +15,7 @@ import * as THREE from "three";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { chainRoom, roomOutline } from "../../utils/roomGeometry";
+import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
 const PIXELS_PER_FOOT = 26; // matches the assumed drawing scale used in PlanPreviewScreen
@@ -744,12 +745,14 @@ export const Room3DScreen = ({ navigation, route }) => {
                 } catch (err) {
                     stopped = true;
                     console.error("Room3D render loop error:", err);
+                    report(err, { feature: "3d", phase: "render-loop" });
                     setGlError(`render loop: ${err?.message ?? err}`);
                 }
             };
             loop();
         } catch (err) {
             console.error("Room3D setup error:", err);
+            report(err, { feature: "3d", phase: "setup" });
             setGlError(`setup: ${err?.message ?? err}`);
         }
     };
