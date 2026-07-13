@@ -3,7 +3,6 @@ import { useState } from "react";
 import {
     ActivityIndicator,
     Alert,
-    Image,
     ScrollView,
     StyleSheet,
     Text,
@@ -12,6 +11,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Sharing from "expo-sharing";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
+import { SafeImage } from "../../components/SafeImage";
 import { useEntitlements } from "../../context/EntitlementsContext";
 import { chooseImage } from "../../utils/imagePick";
 import { generateRedesign } from "../../utils/aiRedesign";
@@ -92,7 +92,7 @@ export const AiRedesignScreen = ({ navigation }) => {
 
             {result ? (
                 <ScrollView contentContainerStyle={styles.content}>
-                    <Image source={{ uri: result }} style={styles.resultImage} resizeMode="cover" />
+                    <SafeImage source={{ uri: result }} style={styles.resultImage} resizeMode="cover" />
                     <View style={styles.resultActions}>
                         <AnimatedPressable onPress={share} scaleTo={0.96} style={styles.primaryBtn}>
                             <Ionicons name="share-outline" size={18} color="#FFFFFF" />
@@ -168,7 +168,7 @@ export const AiRedesignScreen = ({ navigation }) => {
 const PhotoSlot = ({ step, label, uri, onPress }) => (
     <AnimatedPressable onPress={onPress} scaleTo={0.98} style={styles.slot}>
         {uri ? (
-            <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" />
+            <SafeImage source={{ uri }} style={styles.slotImage} resizeMode="cover" />
         ) : (
             <View style={styles.slotEmpty}>
                 <Ionicons name="add" size={30} color={colors.textMuted} />

@@ -3,7 +3,6 @@ import * as ImageManipulator from "expo-image-manipulator";
 import { useEffect, useRef, useState } from "react";
 import {
     ActivityIndicator,
-    Image,
     Modal,
     PanResponder,
     StyleSheet,
@@ -11,6 +10,7 @@ import {
     View,
 } from "react-native";
 import { AnimatedPressable } from "./AnimatedPressable";
+import { SafeImage } from "./SafeImage";
 import { colors, radius } from "../utils/theme";
 
 const MIN_CROP = 48; // minimum crop size in display points
@@ -246,8 +246,8 @@ export const AdjustPhotoModal = ({ visible, asset, onCancel, onDone }) => {
                             })
                         }
                     >
-                        <Image
-                            source={{ uri: working.uri }}
+                        <SafeImage
+                            source={{ uri: working?.uri }}
                             style={styles.image}
                             resizeMode="contain"
                         />

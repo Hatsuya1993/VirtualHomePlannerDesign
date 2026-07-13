@@ -1,3 +1,8 @@
+// MUST be first: registers a global <Image> decorator that neutralises
+// null-uri sources. RN reads the decorator when Image first loads, so this has
+// to run before `expo`/`App` (which transitively import Image).
+import './utils/patchImage';
+
 import { registerRootComponent } from 'expo';
 
 import App from './App';

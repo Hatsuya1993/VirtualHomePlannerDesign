@@ -1,12 +1,18 @@
 import * as Sentry from '@sentry/react-native';
 import { vexo } from 'vexo-analytics';
 import { NavigationContainer } from '@react-navigation/native';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, LogBox, View } from 'react-native';
 import RootNavigator from './navigation';
 import { UnitsProvider } from './context/UnitsContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { EntitlementsProvider } from './context/EntitlementsContext';
 import { colors } from './utils/theme';
+
+// Dev-only safety net: a null/empty image uri surfaces as a RedBox
+// ("No suitable image URL loader found for (null)"). It's harmless (the image
+// just doesn't render, and it's silent in production), so don't let it block
+// the dev flow. Our own images already go through <SafeImage>.
+LogBox.ignoreLogs(['No suitable image URL loader found']);
 
 // Sentry (crash/error monitoring) — only initialized when a DSN is provided.
 const SENTRY_DSN = process.env.EXPO_PUBLIC_SENTRY_DSN;

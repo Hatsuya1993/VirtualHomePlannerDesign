@@ -4,7 +4,6 @@ import {
     ActionSheetIOS,
     ActivityIndicator,
     Alert,
-    Image,
     Platform,
     ScrollView,
     StyleSheet,
@@ -18,6 +17,7 @@ import { useEntitlements } from "../../context/EntitlementsContext";
 import { report } from "../../utils/report";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AdjustPhotoModal } from "../../components/AdjustPhotoModal";
+import { SafeImage } from "../../components/SafeImage";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { FadeSlideIn } from "../../components/FadeSlideIn";
 import {
@@ -569,10 +569,10 @@ export const FloorPlanScreen = ({ navigation }) => {
                 showsVerticalScrollIndicator={false}
             >
                 {/* Selected floor plan preview */}
-                {floorPlan && (
+                {floorPlan?.uri && (
                     <FadeSlideIn>
                         <View style={styles.previewCard}>
-                            <Image
+                            <SafeImage
                                 source={{ uri: floorPlan.uri }}
                                 style={styles.previewImage}
                                 resizeMode="cover"
