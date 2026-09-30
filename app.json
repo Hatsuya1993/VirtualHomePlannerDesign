@@ -7,20 +7,18 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "com.hatsuya.VirtualHomePlannerDesign",
       "usesAppleSignIn": true
     },
     "android": {
+      "package": "com.hatsuya.VirtualHomePlannerDesign",
       "adaptiveIcon": {
         "backgroundColor": "#4644C0",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
-      "permissions": [
-        "android.permission.RECORD_AUDIO"
-      ]
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -31,7 +29,8 @@
         "expo-image-picker",
         {
           "photosPermission": "Allow $(PRODUCT_NAME) to access your photos to upload a floor plan.",
-          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera to capture a floor plan."
+          "cameraPermission": "Allow $(PRODUCT_NAME) to use the camera to capture a floor plan.",
+          "microphonePermission": false
         }
       ],
       "expo-asset",

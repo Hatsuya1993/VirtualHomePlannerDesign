@@ -114,7 +114,11 @@ export const PaywallScreen = ({ navigation }) => {
         }
     };
 
-    // Dev fallback when RevenueCat isn't configured.
+    // Dev fallback when RevenueCat isn't configured. Gated to dev builds: this
+    // path grants Pro without a payment, so a release build with a missing SDK
+    // key (or an offerings fetch that failed) must never be able to reach it.
+    const stubAllowed = __DEV__ && !purchasesAvailable;
+
     const subscribeStub = async () => {
         setBusy(true);
         try {
@@ -237,8 +241,8 @@ export const PaywallScreen = ({ navigation }) => {
                 ) : (
                     <>
                         <AnimatedPressable
-                            onPress={subscribeStub}
-                            disabled={busy}
+                            onPress={stubAllowed ? subscribeStub : undefined}
+                            disabled={busy || !stubAllowed}
                             scaleTo={0.97}
                             style={styles.subscribeBtn}
                         >
@@ -253,7 +257,9 @@ export const PaywallScreen = ({ navigation }) => {
                         <Text style={styles.finePrint}>
                             {purchasesAvailable
                                 ? "Loading plans…"
-                                : "Cancel anytime. Billed monthly."}
+                                : stubAllowed
+                                  ? "Cancel anytime. Billed monthly."
+                                  : "Plans are unavailable right now. Please try again later."}
                         </Text>
                     </>
                 )}
