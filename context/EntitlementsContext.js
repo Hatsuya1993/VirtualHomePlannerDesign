@@ -61,7 +61,7 @@ export const EntitlementsProvider = ({ children }) => {
             })
             .catch(() => {});
 
-        return onSnapshot(
+        const unsub = onSnapshot(
             ref,
             (snap) => {
                 const d = snap.data() || {};
@@ -71,6 +71,17 @@ export const EntitlementsProvider = ({ children }) => {
             },
             () => setLoading(false)
         );
+
+        // Firestore can throw INTERNAL ASSERTION FAILED if the listener is torn
+        // down in the same tick as a sign-out credential change. That throw is
+        // synchronous inside React's effect cleanup, so unguarded it kills the app.
+        return () => {
+            try {
+                unsub();
+            } catch (e) {
+                report(e, { feature: "firestore", op: "unsubscribe:entitlements" });
+            }
+        };
     }, [user]);
 
     // --- RevenueCat: configure + listen for entitlement changes + offerings ---
