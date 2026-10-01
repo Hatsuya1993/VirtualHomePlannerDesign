@@ -83,10 +83,22 @@ export const usePinchPanZoom = ({
         setTransform({ s, tx: m.x - cx * s, ty: m.y - cy * s });
     };
 
+    // Pixels of travel before a touch counts as a pan/drag rather than a tap.
+    const TOUCH_SLOP = 4;
+
     const responder = useRef(
         PanResponder.create({
             onStartShouldSetPanResponder: () => true,
-            onMoveShouldSetPanResponder: () => true,
+            // Only claim the gesture once the finger has actually travelled.
+            // Returning true unconditionally steals the responder from any
+            // Pressable overlaying the canvas (the wall/opening context menus):
+            // Android reports a pixel or two of movement on nearly every tap, so
+            // the press was being terminated before onPress fired, while iOS
+            // reported none and worked by luck.
+            onMoveShouldSetPanResponder: (e, gs) =>
+                gs.numberActiveTouches >= 2 ||
+                Math.abs(gs.dx) > TOUCH_SLOP ||
+                Math.abs(gs.dy) > TOUCH_SLOP,
             onPanResponderTerminationRequest: () => false,
             onPanResponderGrant: (e, gs) => {
                 if (gs.numberActiveTouches >= 2) {
