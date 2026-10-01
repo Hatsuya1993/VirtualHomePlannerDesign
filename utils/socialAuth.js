@@ -51,6 +51,18 @@ export const signInWithGoogle = async () => {
 export const isGoogleCancel = (e) =>
     e?.code === statusCodes.SIGN_IN_CANCELLED || e?.code === statusCodes.IN_PROGRESS;
 
+// Clear the cached Google session. Without this, signing out of Firebase leaves
+// the native Google SDK still holding the last account, so the next
+// "Continue with Google" signs straight back in without offering the account
+// picker. Best-effort: never block app sign-out on it.
+export const signOutGoogle = async () => {
+    try {
+        await GoogleSignin.signOut();
+    } catch {
+        // nothing cached, or configure() was never called this session
+    }
+};
+
 // --- Apple --------------------------------------------------------------
 
 const CHARSET =

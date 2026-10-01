@@ -11,6 +11,7 @@ import {
 } from "firebase/auth";
 import { auth } from "../utils/firebase";
 import { blockEmail, isEmailBlocked } from "../utils/accountBlocklist";
+import { signOutGoogle } from "../utils/socialAuth";
 
 const AuthContext = createContext(null);
 
@@ -40,7 +41,12 @@ export const AuthProvider = ({ children }) => {
     };
     const login = (email, password) =>
         signInWithEmailAndPassword(auth, email.trim(), password);
-    const logout = () => signOut(auth);
+    const logout = async () => {
+        // Clear the Google session first, or the next Google sign-in reuses the
+        // previous account instead of showing the picker.
+        await signOutGoogle();
+        return signOut(auth);
+    };
     const resetPassword = (email) => sendPasswordResetEmail(auth, email.trim());
 
     // Permanently delete the account, reserving its email against reuse. Firebase
