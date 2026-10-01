@@ -1,8 +1,8 @@
+import { useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import {
     Alert,
     Linking,
-    Platform,
     Pressable,
     ScrollView,
     StyleSheet,
@@ -12,6 +12,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as StoreReview from "expo-store-review";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
+import { PromptModal } from "../../components/PromptModal";
 import { FadeSlideIn } from "../../components/FadeSlideIn";
 import { useAuth } from "../../context/AuthContext";
 import { useEntitlements, FREE_AI_TRIES } from "../../context/EntitlementsContext";
@@ -78,7 +79,7 @@ export const AccountScreen = ({ navigation }) => {
             {
                 text: "Log Out",
                 style: "destructive",
-                onPress: () => logout().catch(() => {}),
+                onPress: () => logout().catch(() => { }),
             },
         ]);
     };
@@ -103,21 +104,13 @@ export const AccountScreen = ({ navigation }) => {
     };
 
     // Email/password accounts must re-enter their password to confirm.
+    const [passwordPromptVisible, setPasswordPromptVisible] = useState(false);
+
     const confirmDelete = () => {
-        if (providerId === "password" && Platform.OS === "ios") {
-            Alert.prompt(
-                "Confirm password",
-                "Enter your password to permanently delete your account.",
-                [
-                    { text: "Cancel", style: "cancel" },
-                    {
-                        text: "Delete",
-                        style: "destructive",
-                        onPress: (password) => runDelete(password),
-                    },
-                ],
-                "secure-text"
-            );
+        // Password accounts must re-authenticate before Firebase will delete
+        // them, so we always collect the password — on every platform.
+        if (providerId === "password") {
+            setPasswordPromptVisible(true);
         } else {
             runDelete();
         }
@@ -283,9 +276,8 @@ export const AccountScreen = ({ navigation }) => {
                             <Text style={styles.proSub}>
                                 {isPro
                                     ? "You have unlimited AI."
-                                    : `${aiTriesLeft} of ${FREE_AI_TRIES} free AI ${
-                                          aiTriesLeft === 1 ? "try" : "tries"
-                                      } left`}
+                                    : `${aiTriesLeft} of ${FREE_AI_TRIES} free AI ${aiTriesLeft === 1 ? "try" : "tries"
+                                    } left`}
                             </Text>
                         </View>
                         {!isPro && (
@@ -359,6 +351,17 @@ export const AccountScreen = ({ navigation }) => {
                     </AnimatedPressable>
                 </FadeSlideIn>
             </ScrollView>
+            <PromptModal
+                visible={passwordPromptVisible}
+                title="Confirm password"
+                message="Enter your password to permanently delete your account."
+                placeholder="Password"
+                confirmLabel="Delete"
+                secure
+                destructive
+                onSubmit={(password) => runDelete(password)}
+                onClose={() => setPasswordPromptVisible(false)}
+            />
         </SafeAreaView>
     );
 };

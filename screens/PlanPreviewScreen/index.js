@@ -4,7 +4,6 @@ import {
     ActivityIndicator,
     Alert,
     Linking,
-    Platform,
     Pressable,
     Share,
     StyleSheet,
@@ -28,6 +27,7 @@ import Svg, {
 } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
+import { PromptModal } from "../../components/PromptModal";
 import { GapWarningBanner } from "../../components/GapWarningBanner";
 import { StatsSheet } from "../../components/StatsSheet";
 import { WallSizeSheet } from "../../components/WallSizeSheet";
@@ -204,6 +204,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     const [canvas, setCanvas] = useState({ w: 0, h: 0 });
     const [selectedWall, setSelectedWall] = useState(null);
     const [sizeSheetVisible, setSizeSheetVisible] = useState(false);
+    const [renameVisible, setRenameVisible] = useState(false);
     const [addMenuVisible, setAddMenuVisible] = useState(false);
     const [splitMode, setSplitMode] = useState(false);
     const [addOpeningKind, setAddOpeningKind] = useState(null); // null | "window" | "door"
@@ -884,19 +885,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             }
         }
     };
-    const handleRename = () => {
-        if (Platform.OS !== "ios") return; // Alert.prompt is iOS-only
-        Alert.prompt(
-            "Rename design",
-            "Enter a title for this plan.",
-            [
-                { text: "Cancel", style: "cancel" },
-                { text: "Save", onPress: applyRename },
-            ],
-            "plain-text",
-            name === "Untitled plan" ? "" : name
-        );
-    };
+    const handleRename = () => setRenameVisible(true);
 
     let planks = [];
     if (floorPolygon) {
@@ -1526,6 +1515,16 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 visible={statsVisible}
                 stats={statsVisible ? computeStats(walls, PIXELS_PER_FOOT) : null}
                 onClose={() => setStatsVisible(false)}
+            />
+            <PromptModal
+                visible={renameVisible}
+                title="Rename design"
+                message="Enter a title for this plan."
+                placeholder="Plan title"
+                initialValue={name === "Untitled plan" ? "" : name}
+                confirmLabel="Save"
+                onSubmit={applyRename}
+                onClose={() => setRenameVisible(false)}
             />
         </SafeAreaView>
     );

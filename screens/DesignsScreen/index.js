@@ -1,10 +1,11 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useEffect, useState } from "react";
-import { Alert, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { FadeSlideIn } from "../../components/FadeSlideIn";
 import { PlanMiniature } from "../../components/PlanMiniature";
+import { PromptModal } from "../../components/PromptModal";
 import { useAuth } from "../../context/AuthContext";
 import { useEntitlements } from "../../context/EntitlementsContext";
 import { deleteDesign, renameDesign, subscribeDesigns } from "../../utils/designs";
@@ -54,6 +55,7 @@ export const DesignsScreen = ({ navigation }) => {
     const { user } = useAuth();
     const { pro, loading, promptedRef, markPrompted } = useEntitlements();
     const [designs, setDesigns] = useState([]);
+    const [renaming, setRenaming] = useState(null);
 
     useEffect(() => {
         if (!user) return undefined;
@@ -94,26 +96,12 @@ export const DesignsScreen = ({ navigation }) => {
         );
     };
 
-    const promptRename = (design) => {
-        if (Platform.OS !== "ios") return; // Alert.prompt is iOS-only
-        Alert.prompt(
-            "Rename design",
-            "Enter a new title.",
-            [
-                { text: "Cancel", style: "cancel" },
-                {
-                    text: "Save",
-                    onPress: (text) => {
-                        const next = (text || "").trim();
-                        if (next)
-                            renameDesign(user.uid, design.id, next).catch((e) =>
-                                report(e, { feature: "rename-design" })
-                            );
-                    },
-                },
-            ],
-            "plain-text",
-            design.name === "Untitled plan" ? "" : design.name || ""
+    const promptRename = (design) => setRenaming(design);
+
+    const applyRename = (next) => {
+        if (!renaming) return;
+        renameDesign(user.uid, renaming.id, next).catch((e) =>
+            report(e, { feature: "rename-design" })
         );
     };
 
@@ -169,6 +157,16 @@ export const DesignsScreen = ({ navigation }) => {
                     </View>
                 )}
             </ScrollView>
+            <PromptModal
+                visible={!!renaming}
+                title="Rename design"
+                message="Enter a new title."
+                placeholder="Design title"
+                initialValue={renaming?.name === "Untitled plan" ? "" : renaming?.name || ""}
+                confirmLabel="Save"
+                onSubmit={applyRename}
+                onClose={() => setRenaming(null)}
+            />
         </SafeAreaView>
     );
 };
