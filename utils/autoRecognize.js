@@ -1,18 +1,16 @@
 import * as ImageManipulator from "expo-image-manipulator";
+import { httpsCallable } from "firebase/functions";
+import { functions } from "./firebase";
 
 // Automatic floor-plan recognition via a Claude vision model. The image is
 // downscaled and sent to the Anthropic Messages API, which returns the walls,
 // doors and windows as pixel coordinates in the (downscaled) image space.
 //
-// The API key is read from an EXPO_PUBLIC_ env var so it's configurable without
-// code changes. NOTE: EXPO_PUBLIC_ vars are bundled into the app, so the key is
-// visible to anyone with the build — for production, proxy this through a
-// backend instead of shipping the key on-device.
-const API_URL = "https://api.anthropic.com/v1/messages";
+// The request goes through a callable Cloud Function so the Anthropic key stays
+// server-side — EXPO_PUBLIC_ vars are bundled into the app and extractable from
+// an APK. The function also enforces the free-trial quota, which the client used
+// to track (and could therefore ignore).
 const MAX_DIM = 1500; // downscale longest side → faster/cheaper and within limits
-
-const getKey = () => process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY || "";
-const getModel = () => process.env.EXPO_PUBLIC_ANTHROPIC_MODEL || "claude-sonnet-5";
 
 const buildPrompt = (w, h) =>
     `You are an expert at reading architectural floor plans. The attached image is a floor plan ${w}px wide and ${h}px tall (origin top-left, x right, y down).
@@ -47,13 +45,6 @@ const isSeg = (s) =>
     Array.isArray(s) && s.length === 4 && s.every((n) => Number.isFinite(n));
 
 export const recognizeFloorPlan = async (uri) => {
-    const key = getKey();
-    if (!key) {
-        throw new Error(
-            "No AI key configured. Set EXPO_PUBLIC_ANTHROPIC_API_KEY and restart the bundler."
-        );
-    }
-
     // Downscale and base64-encode the image.
     const img = await ImageManipulator.manipulateAsync(
         uri,
@@ -62,42 +53,19 @@ export const recognizeFloorPlan = async (uri) => {
     );
     if (!img.base64) throw new Error("Could not read the selected image.");
 
-    const res = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-            "content-type": "application/json",
-            "x-api-key": key,
-            "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-            model: getModel(),
-            max_tokens: 4096,
-            messages: [
-                {
-                    role: "user",
-                    content: [
-                        {
-                            type: "image",
-                            source: {
-                                type: "base64",
-                                media_type: "image/jpeg",
-                                data: img.base64,
-                            },
-                        },
-                        { type: "text", text: buildPrompt(img.width, img.height) },
-                    ],
-                },
-            ],
-        }),
-    });
-
-    if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        throw new Error(`AI request failed (${res.status}). ${detail.slice(0, 180)}`);
+    const call = httpsCallable(functions, "recognizeFloorPlan", { timeout: 300000 });
+    let data;
+    try {
+        ({ data } = await call({
+            imageBase64: img.base64,
+            prompt: buildPrompt(img.width, img.height),
+        }));
+    } catch (e) {
+        // Callable errors arrive with the server message already attached.
+        throw new Error(e?.message || "AI request failed.");
     }
 
-    const json = await res.json();
-    const text = (json.content || []).map((c) => c.text || "").join("");
+    const text = data?.text || "";
     const parsed = extractJson(text);
     if (!parsed || !Array.isArray(parsed.walls)) {
         throw new Error("The AI response didn't contain a readable floor plan.");

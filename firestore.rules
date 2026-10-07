@@ -1,0 +1,50 @@
+rules_version = '2';
+
+// Entitlement state (`pro`) and the free-trial counter (`aiTriesUsed`) are
+// written only by Cloud Functions, which use the Admin SDK and bypass these
+// rules. The client may create and update its own profile document but can
+// never set those two fields — previously it could, so a user could grant
+// themselves Pro with a single write, or simply never increment their counter.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Fields the client is allowed to send. Anything else (pro, aiTriesUsed) is
+    // server-only.
+    function noPrivilegedFields() {
+      return !request.resource.data.diff(resource.data)
+        .affectedKeys()
+        .hasAny(['pro', 'aiTriesUsed']);
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+
+      // On create the document must not claim Pro or a pre-spent counter.
+      allow create: if isOwner(uid)
+        && (!('pro' in request.resource.data) || request.resource.data.pro == false)
+        && (!('aiTriesUsed' in request.resource.data) || request.resource.data.aiTriesUsed == 0);
+
+      allow update: if isOwner(uid) && noPrivilegedFields();
+      allow delete: if isOwner(uid);
+
+      // Saved floor plans belong entirely to the user.
+      match /designs/{designId} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    // Deleted-account email hashes. A signed-in user may check a single hash by
+    // id and reserve their own on deletion, but the collection must never be
+    // listable — that would expose the whole set to offline matching.
+    match /blockedEmails/{hash} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if request.auth != null;
+      allow update, delete: if false;
+    }
+  }
+}

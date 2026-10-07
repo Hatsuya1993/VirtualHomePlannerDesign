@@ -1,18 +1,16 @@
 import * as ImageManipulator from "expo-image-manipulator";
 import { File, Paths } from "expo-file-system";
+import { httpsCallable } from "firebase/functions";
+import { functions } from "./firebase";
 
 // AI Redesign: composite an item (2nd image) into a room/scene (1st image)
 // using Google's Gemini image-generation model (the "Nano Banana" family) via
 // the Interactions API. Returns a local file URI of the generated image.
 //
-// The key is read from an EXPO_PUBLIC_ env var. NOTE: EXPO_PUBLIC_ vars are
-// bundled into the app, so the key ships with the build — for production, proxy
-// this through a backend instead of shipping the key on-device.
-const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
+// The request goes through a callable Cloud Function so the Gemini key stays
+// server-side — EXPO_PUBLIC_ vars ship inside the bundle. The function also
+// enforces the free-trial quota.
 const MAX_DIM = 1024; // downscale inputs → faster/cheaper
-
-const getKey = () => process.env.EXPO_PUBLIC_GEMINI_API_KEY || "";
-const getModel = () => process.env.EXPO_PUBLIC_GEMINI_MODEL || "gemini-3.1-flash-image";
 
 const PROMPT =
     "You are an interior-design photo editor. The FIRST image is a room/scene. " +
@@ -65,44 +63,17 @@ const findImage = (node) => {
 };
 
 export const generateRedesign = async (roomUri, itemUri) => {
-    const key = getKey();
-    if (!key) {
-        throw new Error(
-            "No Gemini key configured. Set EXPO_PUBLIC_GEMINI_API_KEY and restart the bundler."
-        );
-    }
-
     const [roomB64, itemB64] = await Promise.all([toBase64(roomUri), toBase64(itemUri)]);
 
-    const res = await fetch(API_URL, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": key },
-        body: JSON.stringify({
-            model: getModel(),
-            input: [
-                { type: "text", text: PROMPT },
-                { type: "image", mime_type: "image/jpeg", data: roomB64 },
-                { type: "image", mime_type: "image/jpeg", data: itemB64 },
-            ],
-            response_format: { type: "image", mime_type: "image/jpeg" },
-        }),
-    });
-
-    if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        if (res.status === 429) {
-            throw new Error(
-                "You've hit Gemini's quota for image generation. The image models are a paid feature with a tiny free-tier limit — enable billing on your Google Cloud project, or wait for the daily quota to reset, then try again."
-            );
-        }
-        if (res.status === 400 && /api key|api_key|invalid/i.test(detail)) {
-            throw new Error("Invalid Gemini API key. Check EXPO_PUBLIC_GEMINI_API_KEY.");
-        }
-        throw new Error(`Image generation failed (${res.status}). ${detail.slice(0, 200)}`);
+    const call = httpsCallable(functions, "generateRedesign", { timeout: 300000 });
+    let data;
+    try {
+        ({ data } = await call({ roomBase64: roomB64, itemBase64: itemB64, prompt: PROMPT }));
+    } catch (e) {
+        throw new Error(e?.message || "Image generation failed.");
     }
 
-    const json = await res.json();
-    const found = findImage(json);
+    const found = findImage(data?.response);
     if (!found) {
         throw new Error("The AI didn't return an image. Try different photos.");
     }

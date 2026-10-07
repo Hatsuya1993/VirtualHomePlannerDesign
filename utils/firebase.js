@@ -1,6 +1,7 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { getAuth, getReactNativePersistence, initializeAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { getFunctions } from "firebase/functions";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // Firebase web config — paste yours from the Firebase console (Project settings
@@ -32,6 +33,10 @@ try {
 } catch {
     auth = getAuth(app);
 }
+
+// Callable Cloud Functions proxy the AI features so their API keys stay
+// server-side. Region must match the functions' deployment region.
+export const functions = getFunctions(app, "us-central1");
 
 // Firestore holds the "reserved" (deleted-account) email hashes.
 export const db = getFirestore(app);
