@@ -14,7 +14,18 @@ import { useEntitlements, FREE_AI_TRIES } from "../../context/EntitlementsContex
 import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
-const PRICE = "$9.99";
+// A package's free intro offer rendered as "3 days free", or null when the
+// product has no trial attached in App Store Connect. Read from the store at
+// runtime so the paywall never advertises a trial that doesn't exist. Whether
+// *this* customer may use it is a separate question — see introEligible below.
+const freeTrialLabel = (pkg) => {
+    const intro = pkg?.product?.introPrice;
+    if (!intro || intro.price > 0) return null;
+    const n = intro.periodNumberOfUnits;
+    const unit = String(intro.periodUnit || "").toLowerCase();
+    if (!n || !unit) return null;
+    return `${n} ${unit}${n === 1 ? "" : "s"} free`;
+};
 
 // Sort order (longest plan first) and display labels per RevenueCat package type.
 const PLAN_RANK = {
@@ -43,37 +54,56 @@ const planLabel = (pkg) =>
 
 const FEATURES = [
     {
-        icon: "scan-outline",
-        title: "Unlimited floor-plan recognition",
-        sub: "Turn any photo into an editable plan, as often as you like.",
+        icon: "image-outline",
+        title: "Turn any photo into a floor plan",
+        sub: "Snap a plan and get an editable diagram, as often as you need.",
     },
     {
-        icon: "image-outline",
-        title: "Unlimited Plan from a Photo",
-        sub: "Snap and convert without limits.",
+        icon: "scan-outline",
+        title: "Walls and doors read for you",
+        sub: "AI picks out the layout and dimensions so you never redraw them.",
     },
     {
         icon: "sparkles-outline",
-        title: "Unlimited AI Redesign",
-        sub: "Drop any item into your room and reimagine it endlessly.",
+        title: "Redesign any room with AI",
+        sub: "Drop in furniture and decor, and see your space reimagined.",
     },
     {
         icon: "flash-outline",
-        title: "First to new AI features",
-        sub: "Every future AI tool included, no extra cost.",
+        title: "Every new AI feature included",
+        sub: "You get each tool we ship, at no extra cost.",
     },
 ];
 
 export const PaywallScreen = ({ navigation }) => {
-    const { pro, aiTriesUsed, packages, purchasesAvailable, purchase, restore, activatePro } =
-        useEntitlements();
+    const {
+        pro,
+        aiTriesUsed,
+        packages,
+        introEligible,
+        purchasesAvailable,
+        purchase,
+        restore,
+        activatePro,
+        refreshOfferings,
+    } = useEntitlements();
     const [busy, setBusy] = useState(false);
     const triesLeft = Math.max(0, FREE_AI_TRIES - aiTriesUsed);
 
     // Show every package in the offering, labelled by its type, longest first.
     const plans = [...packages]
         .sort((a, b) => (PLAN_RANK[a.packageType] ?? 9) - (PLAN_RANK[b.packageType] ?? 9))
-        .map((pkg) => ({ pkg, ...planLabel(pkg) }));
+        .map((pkg) => ({
+            pkg,
+            // Offer a trial only to customers the store will actually grant one
+            // — everyone else sees the plain price they will really be charged.
+            trial: introEligible[pkg.product?.identifier]
+                ? freeTrialLabel(pkg)
+                : null,
+            ...planLabel(pkg),
+        }));
+    // Lead the page with the trial only when the store actually offers one.
+    const leadTrial = plans.find((p) => p.trial)?.trial ?? null;
 
     const proAlert = () =>
         Alert.alert("You're Pro! 🎉", "Enjoy unlimited AI.", [
@@ -109,6 +139,17 @@ export const PaywallScreen = ({ navigation }) => {
         } catch (e) {
             report(e, { feature: "restore" });
             Alert.alert("Restore failed", e?.message ?? "Please try again.");
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    // Offerings failed to load, so the user has nothing to buy. Let them retry
+    // rather than stranding them on a dead button.
+    const handleRetry = async () => {
+        setBusy(true);
+        try {
+            await refreshOfferings();
         } finally {
             setBusy(false);
         }
@@ -154,7 +195,9 @@ export const PaywallScreen = ({ navigation }) => {
                 </View>
                 <Text style={styles.title}>Go Pro</Text>
                 <Text style={styles.subtitle}>
-                    Unlock every AI feature in the app, with no limits.
+                    {leadTrial
+                        ? `Start with ${leadTrial}. Cancel before it ends and you won't be charged.`
+                        : "Unlock every AI feature in the app, with no limits."}
                 </Text>
 
                 <View style={styles.card}>
@@ -179,11 +222,9 @@ export const PaywallScreen = ({ navigation }) => {
                     ))}
                 </View>
 
-                {!pro && (
+                {!pro && triesLeft === 0 && (
                     <Text style={styles.triesNote}>
-                        {triesLeft > 0
-                            ? `You have ${triesLeft} of ${FREE_AI_TRIES} free AI generations left.`
-                            : "You've used all 3 free AI generations."}
+                        You've used all {FREE_AI_TRIES} free AI generations.
                     </Text>
                 )}
 
@@ -207,7 +248,7 @@ export const PaywallScreen = ({ navigation }) => {
                     </View>
                 ) : plans.length > 0 ? (
                     <>
-                        {plans.map(({ pkg, label, period }) => (
+                        {plans.map(({ pkg, label, period, trial }) => (
                             <AnimatedPressable
                                 key={pkg.identifier}
                                 onPress={() => handlePurchase(pkg)}
@@ -217,6 +258,16 @@ export const PaywallScreen = ({ navigation }) => {
                             >
                                 {busy ? (
                                     <ActivityIndicator color="#FFFFFF" />
+                                ) : trial ? (
+                                    <View style={styles.planLabels}>
+                                        <Text style={styles.subscribeText}>
+                                            Start {trial}
+                                        </Text>
+                                        <Text style={styles.planThen}>
+                                            then {pkg.product.priceString}
+                                            {period ? `/${period}` : ""}
+                                        </Text>
+                                    </View>
                                 ) : (
                                     <Text style={styles.subscribeText}>
                                         {label} · {pkg.product.priceString}
@@ -235,14 +286,16 @@ export const PaywallScreen = ({ navigation }) => {
                             <Text style={styles.restoreText}>Restore purchases</Text>
                         </AnimatedPressable>
                         <Text style={styles.finePrint}>
-                            Recurring billing. Cancel anytime in Settings.
+                            {leadTrial
+                                ? "Billing starts when the free trial ends. Cancel anytime in Settings."
+                                : "Recurring billing. Cancel anytime in Settings."}
                         </Text>
                     </>
                 ) : (
                     <>
                         <AnimatedPressable
-                            onPress={stubAllowed ? subscribeStub : undefined}
-                            disabled={busy || !stubAllowed}
+                            onPress={stubAllowed ? subscribeStub : handleRetry}
+                            disabled={busy}
                             scaleTo={0.97}
                             style={styles.subscribeBtn}
                         >
@@ -250,16 +303,14 @@ export const PaywallScreen = ({ navigation }) => {
                                 <ActivityIndicator color="#FFFFFF" />
                             ) : (
                                 <Text style={styles.subscribeText}>
-                                    Subscribe · {PRICE}/month
+                                    {stubAllowed ? "Subscribe (dev)" : "Try again"}
                                 </Text>
                             )}
                         </AnimatedPressable>
                         <Text style={styles.finePrint}>
-                            {purchasesAvailable
-                                ? "Loading plans…"
-                                : stubAllowed
-                                  ? "Cancel anytime. Billed monthly."
-                                  : "Plans are unavailable right now. Please try again later."}
+                            {stubAllowed
+                                ? "Dev build: grants Pro without a payment."
+                                : "We couldn't load plans. Check your connection and try again."}
                         </Text>
                     </>
                 )}
@@ -380,6 +431,14 @@ const styles = StyleSheet.create({
         color: "#FFFFFF",
         fontSize: 16,
         fontWeight: "800",
+    },
+    planLabels: { alignItems: "center" },
+    planThen: {
+        color: "#FFFFFF",
+        opacity: 0.75,
+        fontSize: 12,
+        fontWeight: "600",
+        marginTop: 2,
     },
     finePrint: {
         fontSize: 12,

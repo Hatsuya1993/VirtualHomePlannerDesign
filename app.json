@@ -2,14 +2,23 @@
   "expo": {
     "name": "VirtualHomePlannerDesign",
     "slug": "VirtualHomePlannerDesign",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/3d9faa5c-03b6-46d0-ac9c-2818aa7c6d42"
+    },
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.hatsuya.VirtualHomePlannerDesign",
-      "usesAppleSignIn": true
+      "usesAppleSignIn": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.hatsuya.VirtualHomePlannerDesign",

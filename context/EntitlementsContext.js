@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { Platform } from "react-native";
 import {
     doc,
     getDoc,
@@ -10,6 +11,7 @@ import {
 import * as StoreReview from "expo-store-review";
 import { db } from "../utils/firebase";
 import {
+    INTRO_ELIGIBILITY_STATUS,
     Purchases,
     configurePurchases,
     isProInfo,
@@ -32,8 +34,8 @@ export const EntitlementsProvider = ({ children }) => {
     const [aiTriesUsed, setAiTriesUsed] = useState(0);
     const [loading, setLoading] = useState(true);
     const [packages, setPackages] = useState([]); // offering.availablePackages
-    // Ensures the after-login paywall only auto-shows once per session.
-    const promptedRef = useRef(false);
+    // productId -> may this customer actually use the product's intro offer?
+    const [introEligible, setIntroEligible] = useState({});
 
     const pro = purchasesAvailable ? rcPro : firestorePro;
 
@@ -43,7 +45,6 @@ export const EntitlementsProvider = ({ children }) => {
             setFirestorePro(false);
             setAiTriesUsed(0);
             setLoading(false);
-            promptedRef.current = false;
             return undefined;
         }
         setLoading(true);
@@ -84,6 +85,31 @@ export const EntitlementsProvider = ({ children }) => {
         };
     }, [user]);
 
+    // Fetch the current offering's packages. Exposed so the paywall can retry
+    // when the first fetch failed and it has no plans to show.
+    const refreshOfferings = useCallback(async () => {
+        if (!purchasesAvailable) return [];
+        try {
+            const offerings = await Purchases.getOfferings();
+            const pkgs = offerings.current?.availablePackages ?? [];
+            console.log(
+                "RevenueCat current offering:",
+                offerings.current?.identifier,
+                "packages:",
+                pkgs.map(
+                    (p) => `${p.packageType}/${p.identifier}/${p.product?.identifier}`
+                ),
+                "allOfferings:",
+                Object.keys(offerings.all || {})
+            );
+            setPackages(pkgs);
+            return pkgs;
+        } catch (e) {
+            report(e, { feature: "revenuecat", op: "getOfferings" });
+            return [];
+        }
+    }, []);
+
     // --- RevenueCat: configure + listen for entitlement changes + offerings ---
     useEffect(() => {
         if (!purchasesAvailable) return undefined;
@@ -96,25 +122,47 @@ export const EntitlementsProvider = ({ children }) => {
             .then((info) => setRcPro(isProInfo(info)))
             .catch((e) => report(e, { feature: "revenuecat", op: "getCustomerInfo" }));
 
-        Purchases.getOfferings()
-            .then((offerings) => {
-                const pkgs = offerings.current?.availablePackages ?? [];
-                console.log(
-                    "RevenueCat current offering:",
-                    offerings.current?.identifier,
-                    "packages:",
-                    pkgs.map(
-                        (p) => `${p.packageType}/${p.identifier}/${p.product?.identifier}`
-                    ),
-                    "allOfferings:",
-                    Object.keys(offerings.all || {})
-                );
-                setPackages(pkgs);
-            })
-            .catch((e) => report(e, { feature: "revenuecat", op: "getOfferings" }));
+        refreshOfferings();
 
         return () => Purchases.removeCustomerInfoUpdateListener(listener);
+    }, [refreshOfferings]);
+
+    // A product carries its introPrice whether or not this customer may use it
+    // — Apple grants one intro offer per subscription group, per Apple ID — so
+    // ask RevenueCat before the paywall promises anyone a free trial.
+    const refreshIntroEligibility = useCallback(async (ids) => {
+        if (!purchasesAvailable || !ids.length) return;
+        // The eligibility API is iOS-only; on Android it always answers UNKNOWN.
+        // Play Billing already returns only the offers a customer can use, so
+        // there the product's introPrice is a reliable signal on its own.
+        if (Platform.OS !== "ios") {
+            setIntroEligible(Object.fromEntries(ids.map((id) => [id, true])));
+            return;
+        }
+        try {
+            const res = await Purchases.checkTrialOrIntroductoryPriceEligibility(ids);
+            setIntroEligible(
+                Object.fromEntries(
+                    ids.map((id) => [
+                        id,
+                        res?.[id]?.status ===
+                            INTRO_ELIGIBILITY_STATUS.INTRO_ELIGIBILITY_STATUS_ELIGIBLE,
+                    ])
+                )
+            );
+        } catch (e) {
+            // Fail closed: show normal pricing rather than advertise a trial we
+            // could not confirm the customer will be given.
+            report(e, { feature: "revenuecat", op: "introEligibility" });
+            setIntroEligible({});
+        }
     }, []);
+
+    // Re-check when the plans load and when the signed-in customer changes.
+    useEffect(() => {
+        const ids = packages.map((p) => p.product?.identifier).filter(Boolean);
+        if (ids.length) refreshIntroEligibility(ids);
+    }, [packages, user, refreshIntroEligibility]);
 
     // Tie the RevenueCat identity to the Firebase user so entitlements follow
     // the account across devices.
@@ -183,10 +231,6 @@ export const EntitlementsProvider = ({ children }) => {
         await setDoc(doc(db, "users", user.uid), { pro: true }, { merge: true });
     };
 
-    const markPrompted = () => {
-        promptedRef.current = true;
-    };
-
     return (
         <EntitlementsContext.Provider
             value={{
@@ -196,14 +240,14 @@ export const EntitlementsProvider = ({ children }) => {
                 canUseAi,
                 loading,
                 packages,
+                introEligible,
                 purchasesAvailable,
                 purchase,
                 restore,
                 recordAiUse,
                 onAiSuccess,
                 activatePro,
-                promptedRef,
-                markPrompted,
+                refreshOfferings,
             }}
         >
             {children}

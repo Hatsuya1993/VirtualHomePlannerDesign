@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import Purchases from "react-native-purchases";
+import Purchases, { INTRO_ELIGIBILITY_STATUS } from "react-native-purchases";
 
 // Must match the Entitlement identifier you create in the RevenueCat dashboard.
 export const ENTITLEMENT_ID = "pro";
@@ -25,4 +25,4 @@ export const configurePurchases = () => {
 export const isProInfo = (customerInfo) =>
     !!customerInfo?.entitlements?.active?.[ENTITLEMENT_ID];
 
-export { Purchases };
+export { Purchases, INTRO_ELIGIBILITY_STATUS };

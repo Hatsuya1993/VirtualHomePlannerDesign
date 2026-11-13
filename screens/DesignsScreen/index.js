@@ -7,7 +7,6 @@ import { FadeSlideIn } from "../../components/FadeSlideIn";
 import { PlanMiniature } from "../../components/PlanMiniature";
 import { PromptModal } from "../../components/PromptModal";
 import { useAuth } from "../../context/AuthContext";
-import { useEntitlements } from "../../context/EntitlementsContext";
 import { deleteDesign, renameDesign, subscribeDesigns } from "../../utils/designs";
 import { report } from "../../utils/report";
 import { colors, radius, shadow } from "../../utils/theme";
@@ -53,7 +52,6 @@ const DesignCard = ({ design, onOpen, onLongPress }) => (
 
 export const DesignsScreen = ({ navigation }) => {
     const { user } = useAuth();
-    const { pro, loading, promptedRef, markPrompted } = useEntitlements();
     const [designs, setDesigns] = useState([]);
     const [renaming, setRenaming] = useState(null);
 
@@ -62,13 +60,10 @@ export const DesignsScreen = ({ navigation }) => {
         return subscribeDesigns(user.uid, setDesigns, () => {});
     }, [user]);
 
-    // Show the paywall once, shortly after login, for non-Pro users.
-    useEffect(() => {
-        if (loading || pro || promptedRef.current) return;
-        markPrompted();
-        navigation.navigate("Paywall");
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [loading, pro]);
+    // No paywall here. It is shown at the moments the user actually hits the
+    // free-AI limit — see usePhotoToPlan, AiRedesignScreen, FloorPlanScreen and
+    // PlanPreviewScreen — so it never interrupts a user who has yet to see the
+    // app work.
 
     const openDesign = (design) => {
         navigation.navigate("PlanPreview", {
