@@ -100,6 +100,7 @@ export const FURNITURE_ITEMS = [
     item("dishwasher", "Dishwasher", "kitchen", "dishwasher", 24, 24, 34, "#C9CDD2"),
     item("kitchenIsland", "Kitchen Island", "kitchen", "counter", 72, 36, 36, "#4F6D7A", { variant: "island" }),
     item("pantry", "Tall Pantry", "kitchen", "wardrobe", 30, 24, 84, "#F4F1EA"),
+    item("kitchenMat", "Kitchen Mat", "kitchen", "rug", 60, 20, 0.5, "#6E7F80", { layer: LAYER_RUG }),
 
     // Bathroom
     item("toilet", "Toilet", "bathroom", "toilet", 20, 28, 30, "#FAFAFA"),
@@ -108,6 +109,7 @@ export const FURNITURE_ITEMS = [
     item("bathVanity", "Bathroom Vanity", "bathroom", "vanity", 36, 21, 34, "#5B6C7A"),
     item("washer", "Washing Machine", "bathroom", "washer", 27, 30, 38, "#F5F6F7"),
     item("dryer", "Dryer", "bathroom", "washer", 27, 30, 38, "#F5F6F7"),
+    item("bathMat", "Bath Mat", "bathroom", "rug", 34, 21, 0.5, "#A9C6D3", { layer: LAYER_RUG }),
 
     // Office
     item("desk", "Desk", "office", "desk", 60, 30, 30, "#A47551"),
@@ -115,6 +117,7 @@ export const FURNITURE_ITEMS = [
     item("filingCabinet", "Filing Cabinet", "office", "cabinet", 15, 24, 28, "#9AA1A9", { variant: "drawers" }),
     item("officeShelf", "Shelving Unit", "office", "bookshelf", 48, 14, 72, "#EDE7DD"),
     item("treadmill", "Treadmill", "office", "treadmill", 32, 72, 56, "#2F3237"),
+    item("yogaMat", "Yoga Mat", "office", "rug", 24, 72, 0.25, "#8A7FC4", { layer: LAYER_RUG }),
 
     // Outdoor
     item("patioTable", "Patio Table", "outdoor", "roundTable", 42, 42, 29, "#E7E2D6"),
@@ -130,6 +133,7 @@ export const FURNITURE_ITEMS = [
     item("rug", "Rug", "decor", "rug", 96, 60, 0.5, "#C7B49A", { layer: LAYER_RUG }),
     item("runnerRug", "Runner Rug", "decor", "rug", 96, 30, 0.5, "#9E6B5A", { layer: LAYER_RUG }),
     item("roundRug", "Round Rug", "decor", "roundRug", 72, 72, 0.5, "#A7B8A8", { layer: LAYER_RUG }),
+    item("doorMat", "Door Mat", "decor", "rug", 30, 18, 0.5, "#8B6B4A", { layer: LAYER_RUG }),
     item("floorMirror", "Floor Mirror", "decor", "mirror", 28, 3, 64, "#C9A86A"),
 ];
 
