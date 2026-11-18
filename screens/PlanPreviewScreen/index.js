@@ -1798,7 +1798,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                             y={selectedPiece.y + labelBelow}
                                             fontSize={12 / s}
                                             fontWeight="700"
-                                            fill={FURNITURE_COLOR}
+                                            fill="#000000"
                                             stroke={colors.surface}
                                             strokeWidth={3 / s}
                                             paintOrder="stroke"
