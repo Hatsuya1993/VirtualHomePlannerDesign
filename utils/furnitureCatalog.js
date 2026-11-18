@@ -25,12 +25,25 @@ export const FURNITURE_CATEGORIES = [
     { key: "office", label: "Office", icon: "desk" },
     { key: "outdoor", label: "Outdoor", icon: "pine-tree" },
     { key: "decor", label: "Decor & Lighting", icon: "floor-lamp-outline" },
+    { key: "stairs", label: "Stairs", icon: "stairs" },
 ];
 
 // Drawing order: rugs underneath everything, wall-mounted/raised pieces on top.
 const LAYER_RUG = 0;
 const LAYER_FLOOR = 1;
 const LAYER_RAISED = 2;
+
+function stairDefaults(type) {
+    return {
+        type,
+        steps: null,
+        turn: "left",
+        flightW: 36,
+        handrail: "both",
+        risers: "closed",
+        railColor: "#3B3F45",
+    };
+}
 
 const item = (type, name, category, shape, w, d, h, color, extra = {}) => ({
     type,
@@ -135,6 +148,21 @@ export const FURNITURE_ITEMS = [
     item("roundRug", "Round Rug", "decor", "roundRug", 72, 72, 0.5, "#A7B8A8", { layer: LAYER_RUG }),
     item("doorMat", "Door Mat", "decor", "rug", 30, 18, 0.5, "#8B6B4A", { layer: LAYER_RUG }),
     item("floorMirror", "Floor Mirror", "decor", "mirror", 28, 3, 64, "#C9A86A"),
+
+    // Stairs — h is replaced by the floor's height when placed, so the top
+    // step meets the floor above. See utils/stairs.js for the geometry.
+    item("straightStairs", "Straight Stairs", "stairs", "stairs", 38, 150, 120, "#B08A62", {
+        stair: stairDefaults("straight"),
+    }),
+    item("lStairs", "L-Shaped Stairs", "stairs", "stairs", 84, 112, 120, "#B08A62", {
+        stair: stairDefaults("L"),
+    }),
+    item("uStairs", "U-Shaped Stairs", "stairs", "stairs", 80, 108, 120, "#B08A62", {
+        stair: stairDefaults("U"),
+    }),
+    item("spiralStairs", "Spiral Stairs", "stairs", "stairs", 64, 64, 120, "#5B5F66", {
+        stair: { ...stairDefaults("spiral"), risers: "open", railColor: "#2F3237" },
+    }),
 ];
 
 const BY_TYPE = Object.fromEntries(FURNITURE_ITEMS.map((it) => [it.type, it]));
@@ -190,6 +218,7 @@ export const createFurniture = (type, x, y) => {
         h: c.h,
         elev: c.elev ?? 0,
         color: c.color,
+        ...(c.stair ? { stair: { ...c.stair } } : {}),
     };
 };
 

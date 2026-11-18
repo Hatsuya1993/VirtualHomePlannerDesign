@@ -70,6 +70,8 @@ import { renameDesign, saveDesign, updateDesign } from "../../utils/designs";
 import { useEntitlements } from "../../context/EntitlementsContext";
 import { FloorSheet } from "../../components/FloorSheet";
 import { defaultFloorName, floorsFromParams, makeFloor, outerWallsOf } from "../../utils/floors";
+import { isStairs, stairVoidContent } from "../../utils/stairs";
+import { StairEditSheet } from "../../components/StairEditSheet";
 import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
@@ -283,6 +285,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         Math.min(route.params?.floorIndex ?? 0, floorsFromParams(route.params).length - 1)
     );
     const [floorSheetVisible, setFloorSheetVisible] = useState(false);
+    const [stairEditVisible, setStairEditVisible] = useState(false);
     const [renamingFloor, setRenamingFloor] = useState(null); // floor index | null
     const svgRef = useRef(null);
 
@@ -331,6 +334,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         setAddOpeningKind(null);
         setSelectedFurniture(null);
         setFurnitureEditVisible(false);
+        setStairEditVisible(false);
     };
 
     const undo = () => {
@@ -663,7 +667,8 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             // keeping the opposite side(s) fixed so it grows where you pull.
             const f0 = target.start;
             const { hx, hy } = target;
-            const round = ROUND_SHAPES.has(catalogEntry(f0.type).shape);
+            const round =
+                ROUND_SHAPES.has(catalogEntry(f0.type).shape) || f0.stair?.type === "spiral";
             const l = furnitureToLocal(f0, contentPoint);
             const { w: W0, d: D0 } = footprintPx(f0);
             const minPx = MIN_FURNITURE_IN * PX_PER_IN;
@@ -895,7 +900,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     const gapEnds = warningVisible && hasGap ? openEndpoints(walls) : [];
     // Furniture clashing with other furniture, walls or doors — outlined in
     // red live, and (like a gap) blocks switching to 3D until resolved.
-    const clashes = computeClashes(walls, furniture);
+    const clashes = computeClashes(walls, furniture, stairVoids);
     const hasClash = clashes.ids.size > 0;
 
     const selected = selectedWall !== null ? walls[selectedWall] : null;
@@ -1073,6 +1078,8 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         const cx = canvas.w ? (canvas.w / 2 - transform.tx) / transform.s : 0;
         const cy = canvas.h ? (canvas.h / 2 - transform.ty) / transform.s : 0;
         const piece = createFurniture(type, cx, cy);
+        // Stairs rise exactly one floor.
+        if (isStairs(piece)) piece.h = floors[floorIndex]?.heightIn ?? piece.h;
         snapshot();
         setFurniture((fs) => [...fs, piece]);
         setSelectedWall(null);
@@ -1115,7 +1122,10 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
 
     const handleFurnitureAction = (key) => {
         if (key === "rotate") rotateSelectedFurniture();
-        else if (key === "edit") setFurnitureEditVisible(true);
+        else if (key === "edit") {
+            if (isStairs(selectedPiece)) setStairEditVisible(true);
+            else setFurnitureEditVisible(true);
+        }
         else if (key === "copy") copySelectedFurniture();
         else if (key === "delete") deleteSelectedFurniture();
     };
@@ -1235,8 +1245,18 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         loadFloor([...fs, next], fs.length);
     };
 
-    const setFloorHeight = (i, heightIn) =>
-        setFloors((fs) => fs.map((f, j) => (j === i ? { ...f, heightIn } : f)));
+    // Changing a floor's height also re-fits the stairs standing on it.
+    const setFloorHeight = (i, heightIn) => {
+        const fit = (list) => list.map((p) => (isStairs(p) ? { ...p, h: heightIn } : p));
+        setFloors((fs) =>
+            fs.map((f, j) =>
+                j === i
+                    ? { ...f, heightIn, furniture: j === floorIndex ? f.furniture : fit(f.furniture) }
+                    : f
+            )
+        );
+        if (i === floorIndex) setFurniture((list) => fit(list));
+    };
 
     const applyFloorRename = (text) => {
         const next = (text || "").trim();
@@ -1276,6 +1296,10 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     };
 
     const floorBelow = floorIndex > 0 ? floors[floorIndex - 1] : null;
+    // Stairwell openings on this floor, made by stairs on the floor below.
+    const stairVoids = floorBelow
+        ? floorBelow.furniture.filter(isStairs).map((f) => stairVoidContent(f, PX_PER_IN))
+        : [];
 
     const handleSave = async () => {
         if (!user) {
@@ -1640,6 +1664,35 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                     opacity={0.8}
                                 />
                             ))}
+
+                        {/* Stairwell openings from the floor below */}
+                        {stairVoids.map((v, i) => {
+                            const cx = v.reduce((a, p) => a + p.x, 0) / v.length;
+                            const cy = v.reduce((a, p) => a + p.y, 0) / v.length;
+                            const pts = v.map((p) => `${p.x},${p.y}`).join(" ");
+                            return (
+                                <G key={`void${i}`}>
+                                    <Polygon
+                                        points={pts}
+                                        fill="#CBD5E1"
+                                        fillOpacity={0.55}
+                                        stroke="#64748B"
+                                        strokeWidth={1.5 / transform.s}
+                                        strokeDasharray={`${6 / transform.s} ${4 / transform.s}`}
+                                    />
+                                    <SvgText
+                                        x={cx}
+                                        y={cy}
+                                        fontSize={11 / transform.s}
+                                        fontWeight="700"
+                                        fill="#334155"
+                                        textAnchor="middle"
+                                    >
+                                        Open to below
+                                    </SvgText>
+                                </G>
+                            );
+                        })}
 
                         {/* Furniture (under the walls, so pieces pushed
                             against a wall tuck neatly beneath its line) */}
@@ -2214,6 +2267,13 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 visible={furnitureSheetVisible}
                 onPick={addFurniture}
                 onClose={() => setFurnitureSheetVisible(false)}
+            />
+
+            <StairEditSheet
+                visible={stairEditVisible && isStairs(selectedPiece)}
+                item={selectedPiece}
+                onApply={updateSelectedFurniture}
+                onClose={() => setStairEditVisible(false)}
             />
 
             <FurnitureEditSheet

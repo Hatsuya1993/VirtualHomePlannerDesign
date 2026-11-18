@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { catalogEntry, PIXELS_PER_FOOT, shade } from "./furnitureCatalog";
+import { stairLayout } from "./stairs";
 
 // Procedural low-poly 3D models for the furniture catalog. Every builder
 // works in feet, returns a THREE.Group whose origin sits on the floor at the
@@ -713,6 +714,84 @@ const BUILDERS = {
         k.box(w * 0.5, 0.05, d * 0.8, "#3B3F45", 0, baseY * 0.3, 0);
     },
 
+    // Stairs from the shared layout (inches, local frame) — see utils/stairs.js.
+    stairs: ({ k, color, item }) => {
+        const L = stairLayout(item);
+        const ft = (v) => v / 12;
+        const open = item.stair?.risers === "open" || item.stair?.type === "spiral";
+        const railColor = item.stair?.railColor || "#3B3F45";
+        const treadMat = k.mat(color, { roughness: 0.6 });
+        const railMat = k.mat(railColor, { metalness: 0.4, roughness: 0.45 });
+        const TREAD_T = 0.13; // ft
+
+        // Each tread/landing: its polygon extruded downward from its top —
+        // a thin slab for open risers, solid to the floor for closed ones.
+        L.treads.forEach((t) => {
+            const shape = new THREE.Shape(t.poly.map((p) => new THREE.Vector2(ft(p.x), ft(p.y))));
+            const top = ft(t.top);
+            const depth = open ? TREAD_T : top;
+            const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+            geo.rotateX(Math.PI / 2); // shape y → +z, extrusion → down
+            const m = new THREE.Mesh(geo, treadMat);
+            m.position.y = top;
+            k.add(m);
+        });
+
+        // A straight beam between two points (stringers, rails).
+        const beam = (a, b, thick, mat) => {
+            const len = a.distanceTo(b);
+            if (len < 0.01) return;
+            const m = new THREE.Mesh(new THREE.BoxGeometry(thick, thick, len), mat);
+            m.position.copy(a).add(b).multiplyScalar(0.5);
+            m.lookAt(b);
+            k.add(m);
+        };
+        const v3 = (p, top) => new THREE.Vector3(ft(p.x), ft(top), ft(p.y));
+
+        // Open stairs get stringers under both sides of each flight.
+        if (open && !L.post) {
+            const line = L.treads.map((t) => ({ ...t.center, top: t.top }));
+            [-1, 1].forEach((side) => {
+                for (let i = 1; i < line.length; i++) {
+                    const a = line[i - 1];
+                    const b = line[i];
+                    const dx = b.x - a.x;
+                    const dy = b.y - a.y;
+                    const len = Math.hypot(dx, dy) || 1;
+                    const off = (L.flightW / 2 - 1) * side;
+                    const o = { x: (dy / len) * off, y: (-dx / len) * off };
+                    beam(
+                        v3({ x: a.x + o.x, y: a.y + o.y }, a.top - 2),
+                        v3({ x: b.x + o.x, y: b.y + o.y }, b.top - 2),
+                        0.16,
+                        treadMat
+                    );
+                }
+            });
+        }
+
+        // Spiral: central column.
+        if (L.post) {
+            k.cyl(ft(L.post.r), ft(L.post.r), ft(item.h + 36), railColor, 0, ft(item.h + 36) / 2, 0, {
+                metalness: 0.4,
+                roughness: 0.45,
+            }, 12);
+        }
+
+        // Handrails with balusters every other step.
+        L.rails.forEach((rail) => {
+            for (let i = 1; i < rail.length; i++) beam(v3(rail[i - 1], rail[i - 1].top), v3(rail[i], rail[i].top), 0.12, railMat);
+            rail.forEach((p, i) => {
+                if (i % 2 && i !== rail.length - 1) return;
+                const footTop = p.top - 36;
+                k.cyl(0.03, 0.03, ft(36), railColor, ft(p.x), ft(footTop) + ft(36) / 2, ft(p.y), {
+                    metalness: 0.4,
+                    roughness: 0.45,
+                }, 6);
+            });
+        });
+    },
+
     mirror: ({ k, w, d, h, color }) => {
         const tilt = 0.12;
         // leaning back against the wall behind it
@@ -745,7 +824,7 @@ export const buildFurniture = (furniture, toFeet) => {
             const color = f.color || entry.color;
 
             const piece = new THREE.Group();
-            builder({ k: kit(piece, mat), w, d, h, color, entry: { ...entry, elev: f.elev ?? entry.elev ?? 0 } });
+            builder({ k: kit(piece, mat), w, d, h, color, entry: { ...entry, elev: f.elev ?? entry.elev ?? 0 }, item: f });
 
             const p = toFeet(f.x, f.y);
             piece.position.set(p.x, (f.elev ?? 0) / 12, p.z);
@@ -756,7 +835,14 @@ export const buildFurniture = (furniture, toFeet) => {
 
             // Walk collision: only pieces that sit on the floor and are tall
             // enough to bump into (rugs, raised cabinets etc. are ignored).
-            if ((f.elev ?? 0) < 2 * 12 && h > 0.9 && entry.shape !== "rug" && entry.shape !== "roundRug") {
+            // Stairs aren't obstacles: walking onto them climbs (Room3DScreen).
+            if (
+                (f.elev ?? 0) < 2 * 12 &&
+                h > 0.9 &&
+                entry.shape !== "rug" &&
+                entry.shape !== "roundRug" &&
+                entry.shape !== "stairs"
+            ) {
                 const a = (-(f.rot || 0) * Math.PI) / 180;
                 const cos = Math.cos(a);
                 const sin = Math.sin(a);

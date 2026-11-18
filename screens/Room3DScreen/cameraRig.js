@@ -45,6 +45,11 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
         blocked,
         roomCenter,
         eye: Math.min(EYE_HEIGHT_FT, ceilingHeight - 0.5),
+        // Height of the stair step under the walker (ft, relative to this
+        // floor; negative on a stair coming up from the floor below), eased
+        // so climbing feels like a smooth ramp.
+        stepY: 0,
+        stepTarget: 0,
     };
 
     const fitOrbitDist = () => (radius / Math.sin((FOV.orbit * Math.PI) / 360)) * 1.02;
@@ -92,7 +97,7 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
     const desiredPose = (outPos, outLook) => {
         if (s.mode === "walk") {
             const w = s.walk;
-            const eyeY = level.baseY + level.eye;
+            const eyeY = level.baseY + level.stepY + level.eye;
             outPos.set(w.x, eyeY, w.z);
             outLook.set(
                 w.x - Math.sin(w.yaw) * Math.cos(w.pitch),
@@ -212,7 +217,12 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
         },
         // True while the camera is still easing somewhere (so keep rendering).
         get busy() {
-            return s.transition > 0 || Math.abs(s.orbit.yawVel) > 1e-3 || !!s.walk.glide;
+            return (
+                s.transition > 0 ||
+                Math.abs(s.orbit.yawVel) > 1e-3 ||
+                !!s.walk.glide ||
+                Math.abs(level.stepTarget - level.stepY) > 1e-3
+            );
         },
 
         setAspect(a) {
@@ -224,6 +234,10 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
         // carry the walker across) pass false. `eye` is the eye height above
         // the floor, which stairs vary as you climb.
         setLevel({ baseY: y, blocked: b, roomCenter: rc, ceilingHeight: ch }, teleport = true) {
+            // Keep the walker's absolute height continuous across the switch.
+            const shift = level.baseY - y;
+            level.stepY = teleport ? 0 : level.stepY + shift;
+            level.stepTarget = teleport ? 0 : level.stepTarget + shift;
             level.baseY = y;
             level.blocked = b;
             level.roomCenter = rc;
@@ -236,6 +250,16 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
                 s.walk.glide = null;
                 s.transition = MODE_TRANSITION_S;
             }
+        },
+
+        // Height (ft, relative to the current floor) of the stair step under
+        // the walker; eased toward in update().
+        setStepTarget(y) {
+            level.stepTarget = y;
+        },
+
+        get stepY() {
+            return level.stepTarget;
         },
 
         get walkPos() {
@@ -259,6 +283,8 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
             } else if (s.mode === "top") {
                 Object.assign(s.top, { tx: cx, tz: cz, dist: fitTopDist(s.aspect) });
             } else {
+                level.stepY = 0;
+                level.stepTarget = 0;
                 Object.assign(s.walk, {
                     x: level.roomCenter.x,
                     z: level.roomCenter.z,
@@ -335,6 +361,8 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
         // Advance by dt seconds and write the eased pose into pos/look/fov.
         update(dt) {
             if (s.mode === "walk") stepWalk(dt);
+            level.stepY += (level.stepTarget - level.stepY) * damp(10, dt);
+            if (Math.abs(level.stepTarget - level.stepY) < 1e-3) level.stepY = level.stepTarget;
 
             // Orbit coasting.
             if (Math.abs(s.orbit.yawVel) > 1e-3) {

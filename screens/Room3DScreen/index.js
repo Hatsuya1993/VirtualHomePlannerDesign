@@ -19,6 +19,8 @@ import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { chainRoom, roomOutline } from "../../utils/roomGeometry";
 import { buildFurniture, insideCollider } from "../../utils/furniture3D";
 import { floorsFromParams, floorShortLabel } from "../../utils/floors";
+import { isStairs, stairLayout, stairVoidContent } from "../../utils/stairs";
+import { createStairWalker } from "./stairWalk";
 import { createCameraRig } from "./cameraRig";
 import {
     addEnvironment,
@@ -194,7 +196,10 @@ const distanceToWallSegment = (x, z, s) => {
 
 // Builds the Three.js scene (floor, ceiling, extruded walls, furniture, a
 // pendant light) from the 2D plan, in feet, centered on the room.
-const buildScene = (walls, { maxAnisotropy = 1, furniture = [], origin = null } = {}) => {
+const buildScene = (
+    walls,
+    { maxAnisotropy = 1, furniture = [], origin = null, floorHoles = [], ceilingHoles = [] } = {}
+) => {
     const scene = new THREE.Scene();
     // Door pivots to animate open in the render loop: { pivot, base, target }.
     const doors = [];
@@ -244,7 +249,16 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [], origin = null } 
     const shapePts = roomPolygon.map((f) => new THREE.Vector2(f.x, f.z));
     let ceilingMesh = null; // exposed so the dollhouse/top views can hide it
     if (shapePts.length >= 3) {
-        const shape = new THREE.Shape(shapePts);
+        // Stairwells: holes (world-feet polygons) cut out of this floor (a
+        // stair coming up from below) and out of the ceiling (a stair going up).
+        const shapeWithHoles = (holes) => {
+            const sh = new THREE.Shape(shapePts);
+            (holes ?? []).forEach((hp) =>
+                sh.holes.push(new THREE.Path(hp.map((p) => new THREE.Vector2(p.x, p.z))))
+            );
+            return sh;
+        };
+        const shape = shapeWithHoles(floorHoles);
 
         const floorGeo = new THREE.ShapeGeometry(shape);
         floorGeo.rotateX(Math.PI / 2);
@@ -259,7 +273,7 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [], origin = null } 
         );
         scene.add(floor);
 
-        const ceilingGeo = new THREE.ShapeGeometry(shape);
+        const ceilingGeo = new THREE.ShapeGeometry(shapeWithHoles(ceilingHoles));
         ceilingGeo.rotateX(Math.PI / 2);
         ceilingGeo.translate(0, ceilingHeight, 0);
         const ceiling = new THREE.Mesh(
@@ -622,17 +636,48 @@ const buildBuilding = (floors, { maxAnisotropy = 1 } = {}) => {
         ? { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 }
         : { x: 0, y: 0 };
 
+    const toFeet = (x, y) => ({ x: (x - origin.x) / PIXELS_PER_FOOT, z: (y - origin.y) / PIXELS_PER_FOOT });
+    // Stairs always rise exactly one floor: their height is the floor's.
+    const withStairHeights = (f) =>
+        (f.furniture ?? []).map((p) => (isStairs(p) ? { ...p, h: f.heightIn || 120 } : p));
+    // Stairwell openings (world feet) made by each floor's stairs.
+    const stairHoles = floors.map((f) =>
+        withStairHeights(f)
+            .filter(isStairs)
+            .map((p) => stairVoidContent(p, PIXELS_PER_FOOT / 12).map((q) => toFeet(q.x, q.y)))
+    );
+
     let elevIn = 0;
     const levels = floors.map((f, i) => {
         const base = elevIn / 12;
         elevIn += f.heightIn || 120;
+        const furniture = withStairHeights(f);
+        // The opening above a stair only exists if there is a floor above.
+        const holesBelow = i > 0 ? stairHoles[i - 1] : [];
+        const holesHere = i < floors.length - 1 ? stairHoles[i] : [];
         const group = new THREE.Group();
         group.position.y = base;
         scene.add(group);
         if (!f.walls?.length) {
-            return { group, base, empty: true, doors: [], wallGroups: [], pendant: [], ceilingMesh: null };
+            return {
+                group,
+                base,
+                heightIn: f.heightIn || 120,
+                empty: true,
+                doors: [],
+                wallGroups: [],
+                pendant: [],
+                ceilingMesh: null,
+                stairs: [],
+            };
         }
-        const r = buildScene(f.walls, { maxAnisotropy, furniture: f.furniture ?? [], origin });
+        const r = buildScene(f.walls, {
+            maxAnisotropy,
+            furniture,
+            origin,
+            floorHoles: holesBelow,
+            ceilingHoles: holesHere,
+        });
         // Move the floor's meshes into its group. Upper floors drop the
         // scene-wide fill lights (only one set is needed) but keep their
         // own pendant lamp.
@@ -648,12 +693,12 @@ const buildBuilding = (floors, { maxAnisotropy = 1 } = {}) => {
             );
             const depth = Math.min(1.5, Math.max(0.15, (below.heightIn || 120) / 12 - belowWallFt));
             const slab = new THREE.Mesh(
-                floorSlabGeometry(r.roomPolygon, depth, f.slabHoles),
+                floorSlabGeometry(r.roomPolygon, depth, holesBelow),
                 new THREE.MeshStandardMaterial({ color: SLAB_COLOR, roughness: 0.9 })
             );
             group.add(slab);
         }
-        addFurnitureShadows(group, f.furniture ?? [], r.toFeet);
+        addFurnitureShadows(group, furniture, r.toFeet);
         addWallOcclusion(group, r.wallParts);
         const wallGroups = groupWalls(group, r.wallParts, r.roomCenter);
 
@@ -668,6 +713,8 @@ const buildBuilding = (floors, { maxAnisotropy = 1 } = {}) => {
         return {
             group,
             base,
+            heightIn: f.heightIn || 120,
+            stairs: furniture.filter(isStairs).map((sf) => ({ f: sf, layout: stairLayout(sf) })),
             empty: false,
             doors: r.doors,
             wallGroups,
@@ -845,7 +892,6 @@ export const Room3DScreen = ({ navigation, route }) => {
         focusRef.current = i;
         setFocusFloorState(i);
         if (!levels || !rigRef.current) return;
-        levels.forEach((l, j) => (l.group.visible = j <= i));
         rigRef.current.setLevel(
             {
                 baseY: levels[i].base,
@@ -977,8 +1023,12 @@ export const Room3DScreen = ({ navigation, route }) => {
             // Furniture you'd bump into blocks walking too — except any piece
             // the camera starts inside (e.g. a table at the room's center),
             // which would otherwise trap you. (Handled per floor in buildBuilding.)
-            const { scene, levels, allPts } = buildBuilding(floors, { maxAnisotropy });
+            const { scene, levels, allPts, origin } = buildBuilding(floors, { maxAnisotropy });
             levelsRef.current = levels;
+
+            // Walking up/down stairs between floors (see stairWalk.js).
+            const stairWalker = createStairWalker(levels, origin, PIXELS_PER_FOOT);
+
             const disposeEnv = addEnvironment(scene);
             const doors = levels.flatMap((l) => l.doors);
             const wallGroups = levels.flatMap((l) => l.wallGroups);
@@ -1046,6 +1096,7 @@ export const Room3DScreen = ({ navigation, route }) => {
             let stopped = false;
             let firstFrame = true;
             let shownMode = null;
+            let shownVis = null;
             const lastPos = new THREE.Vector3(Infinity, 0, 0);
             const lastLook = new THREE.Vector3();
             let lastFov = 0;
@@ -1060,6 +1111,30 @@ export const Room3DScreen = ({ navigation, route }) => {
 
                     rig.update(dt);
                     let needsDraw = dirtyRef.current || rig.busy;
+
+                    // Walking on stairs: follow the step height, and hand over
+                    // to the next floor once past halfway up (or down).
+                    if (rig.mode === "walk") {
+                        const { x, z } = rig.walkPos;
+                        const { floor, stepIn } = stairWalker.update(focusRef.current, x, z);
+                        if (floor !== focusRef.current) setFocusFloor(floor, false);
+                        if (Math.abs(rig.stepY - stepIn / 12) > 1e-4) {
+                            rig.setStepTarget(stepIn / 12);
+                            needsDraw = true;
+                        }
+                    } else if (rig.stepY !== 0) {
+                        stairWalker.reset();
+                        rig.setStepTarget(0);
+                    }
+
+                    // Walk shows the whole building (you can look up a
+                    // stairwell); Orbit/Top hide floors above the focus.
+                    const visKey = `${rig.mode === "walk"}|${focusRef.current}`;
+                    if (visKey !== shownVis) {
+                        shownVis = visKey;
+                        levels.forEach((l, j) => (l.group.visible = rig.mode === "walk" || j <= focusRef.current));
+                        needsDraw = true;
+                    }
 
                     // Ceiling and pendant only make sense from inside.
                     if (shownMode !== rig.mode) {

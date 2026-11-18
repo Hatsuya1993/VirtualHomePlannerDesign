@@ -1,5 +1,6 @@
-import { Circle, Ellipse, G, Line, Path, Rect } from "react-native-svg";
+import { Circle, Ellipse, G, Line, Path, Polygon, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import { catalogEntry, PX_PER_IN, shade } from "../utils/furnitureCatalog";
+import { stairLayout } from "../utils/stairs";
 
 // Top-view drawing of one furniture piece, in its own local frame: centered on
 // (0, 0), width along x, depth along y, "front" facing +y. The caller wraps it
@@ -723,6 +724,73 @@ const GLYPHS = {
                 <R x={-W / 2} y={-D * 0.4} w={W} h={D * 0.8} r={1} fill="#8A9097" {...st(sw, "#555")} />
                 <R x={-W * 0.3} y={-D / 2} w={W * 0.6} h={D} r={3} fill={color} {...st(sw, "#555")} />
                 {grate}
+            </>
+        );
+    },
+
+    // Architectural stair symbol: each step outlined, handrails, and an arrow
+    // along the walking line pointing UP from the bottom step.
+    stairs: ({ color, sw, item }) => {
+        const L = stairLayout(item);
+        const k = PX_PER_IN;
+        const pts = (poly) => poly.map((p) => `${p.x * k},${p.y * k}`).join(" ");
+        const tread = shade(color, 0.55);
+        const edge = shade(color, -0.35);
+        const path = L.path.map((p) => ({ x: p.x * k, y: p.y * k }));
+        const end = path[path.length - 1];
+        const prev = path[path.length - 2];
+        const ang = Math.atan2(end.y - prev.y, end.x - prev.x);
+        const ah = Math.max(4, L.flightW * k * 0.22);
+        const arrow = [
+            end,
+            { x: end.x - Math.cos(ang - 0.45) * ah, y: end.y - Math.sin(ang - 0.45) * ah },
+            { x: end.x - Math.cos(ang + 0.45) * ah, y: end.y - Math.sin(ang + 0.45) * ah },
+        ];
+        const start = path[0];
+        const fs = Math.max(5, Math.min(14, L.flightW * k * 0.28));
+        return (
+            <>
+                {L.treads.map((t, i) => (
+                    <Polygon
+                        key={i}
+                        points={pts(t.poly)}
+                        fill={tread}
+                        stroke={edge}
+                        strokeWidth={sw * 0.8}
+                        strokeLinejoin="round"
+                    />
+                ))}
+                {L.post && <Circle cx={0} cy={0} r={L.post.r * k} fill={edge} />}
+                {L.rails.map((r, i) => (
+                    <Polyline
+                        key={`r${i}`}
+                        points={r.map((p) => `${p.x * k},${p.y * k}`).join(" ")}
+                        fill="none"
+                        stroke={item.stair?.railColor || "#3B3F45"}
+                        strokeWidth={sw * 2.2}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                    />
+                ))}
+                <Polyline
+                    points={path.map((p) => `${p.x},${p.y}`).join(" ")}
+                    fill="none"
+                    stroke="#334155"
+                    strokeWidth={sw * 1.2}
+                    strokeLinejoin="round"
+                />
+                <Polygon points={arrow.map((p) => `${p.x},${p.y}`).join(" ")} fill="#334155" />
+                <Circle cx={start.x} cy={start.y - 2} r={Math.max(1.5, sw * 1.6)} fill="#334155" />
+                <SvgText
+                    x={start.x}
+                    y={start.y - fs * 0.6}
+                    fontSize={fs}
+                    fontWeight="800"
+                    fill="#334155"
+                    textAnchor="middle"
+                >
+                    UP
+                </SvgText>
             </>
         );
     },

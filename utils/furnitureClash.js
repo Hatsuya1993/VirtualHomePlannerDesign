@@ -164,9 +164,11 @@ const tucksUnder = (f, g) => {
         (SEAT_SHAPES.has(sg) && SURFACE_SHAPES.has(sf));
 };
 
+// `voids` are stairwell openings on this floor (content-space polygons, from
+// stairs on the floor below) — nothing may stand in one.
 // Returns { ids: Set of clashing piece ids, issues: [{ id, kind, other }] }
-// where kind is "furniture" | "wall" | "door".
-export const computeClashes = (walls = [], furniture = []) => {
+// where kind is "furniture" | "wall" | "door" | "void".
+export const computeClashes = (walls = [], furniture = [], voids = []) => {
     const ids = new Set();
     const issues = [];
     const tol = TOLERANCE_IN * PX_PER_IN;
@@ -208,6 +210,12 @@ export const computeClashes = (walls = [], furniture = []) => {
             ids.add(f.id);
             issues.push({ id: f.id, kind: "door" });
         }
+        // Stairwell openings: tested as convex hulls (stair voids are
+        // rectangles or circles, so that's exact).
+        if (voids.some((v) => v.length >= 3 && polysOverlap(poly, v))) {
+            ids.add(f.id);
+            issues.push({ id: f.id, kind: "void" });
+        }
     });
 
     return { ids, issues };
@@ -221,6 +229,7 @@ export const clashMessage = ({ ids, issues }) => {
         kinds.has("furniture") && "each other",
         kinds.has("wall") && "a wall",
         kinds.has("door") && "a door",
+        kinds.has("void") && "a stair opening",
     ].filter(Boolean);
     const list =
         what.length > 1 ? `${what.slice(0, -1).join(", ")} or ${what[what.length - 1]}` : what[0];
