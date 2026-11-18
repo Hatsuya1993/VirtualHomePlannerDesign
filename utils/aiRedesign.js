@@ -1,7 +1,6 @@
 import * as ImageManipulator from "expo-image-manipulator";
 import { File, Paths } from "expo-file-system";
-import { httpsCallable } from "firebase/functions";
-import { functions } from "./firebase";
+import { callFunction } from "./callFunction";
 
 // AI Redesign: composite an item (2nd image) into a room/scene (1st image)
 // using Google's Gemini image-generation model (the "Nano Banana" family) via
@@ -65,13 +64,12 @@ const findImage = (node) => {
 export const generateRedesign = async (roomUri, itemUri) => {
     const [roomB64, itemB64] = await Promise.all([toBase64(roomUri), toBase64(itemUri)]);
 
-    const call = httpsCallable(functions, "generateRedesign", { timeout: 300000 });
-    let data;
-    try {
-        ({ data } = await call({ roomBase64: roomB64, itemBase64: itemB64, prompt: PROMPT }));
-    } catch (e) {
-        throw new Error(e?.message || "Image generation failed.");
-    }
+    // Direct call (see callFunction.js) — errors carry the server's message.
+    const data = await callFunction("generateRedesign", {
+        roomBase64: roomB64,
+        itemBase64: itemB64,
+        prompt: PROMPT,
+    });
 
     const found = findImage(data?.response);
     if (!found) {

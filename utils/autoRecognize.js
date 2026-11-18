@@ -1,6 +1,5 @@
 import * as ImageManipulator from "expo-image-manipulator";
-import { httpsCallable } from "firebase/functions";
-import { functions } from "./firebase";
+import { callFunction } from "./callFunction";
 
 // Automatic floor-plan recognition via a Claude vision model. The image is
 // downscaled and sent to the Anthropic Messages API, which returns the walls,
@@ -53,17 +52,11 @@ export const recognizeFloorPlan = async (uri) => {
     );
     if (!img.base64) throw new Error("Could not read the selected image.");
 
-    const call = httpsCallable(functions, "recognizeFloorPlan", { timeout: 300000 });
-    let data;
-    try {
-        ({ data } = await call({
-            imageBase64: img.base64,
-            prompt: buildPrompt(img.width, img.height),
-        }));
-    } catch (e) {
-        // Callable errors arrive with the server message already attached.
-        throw new Error(e?.message || "AI request failed.");
-    }
+    // Direct call (see callFunction.js) — errors carry the server's message.
+    const data = await callFunction("recognizeFloorPlan", {
+        imageBase64: img.base64,
+        prompt: buildPrompt(img.width, img.height),
+    });
 
     const text = data?.text || "";
     const parsed = extractJson(text);
