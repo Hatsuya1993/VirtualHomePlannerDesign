@@ -2,7 +2,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { GLView } from "expo-gl";
 import { Renderer } from "expo-three";
 import { useEffect, useRef, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
+    ActivityIndicator,
     Animated,
     PanResponder,
     PixelRatio,
@@ -16,18 +18,23 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { chainRoom, roomOutline } from "../../utils/roomGeometry";
 import { buildFurniture, insideCollider } from "../../utils/furniture3D";
+import { createCameraRig } from "./cameraRig";
+import {
+    addEnvironment,
+    addFurnitureShadows,
+    addWallOcclusion,
+    groupWalls,
+    HORIZON,
+    updateWallCutaway,
+} from "./sceneExtras";
 import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
 const PIXELS_PER_FOOT = 26; // matches the assumed drawing scale used in PlanPreviewScreen
 const DEFAULT_HEIGHT_IN = 118; // 9'10", matches WallSizeSheet's default
 const DEFAULT_THICKNESS_IN = 8;
-const EYE_HEIGHT_FT = 5.5;
-const WALK_SPEED = 5; // feet per second at full joystick deflection
 const WALL_COLLIDE_MARGIN = 0.28; // how close the camera may get to a solid wall segment
 const FURNITURE_COLLIDE_MARGIN = 0.35; // and to the edge of a piece of furniture
-const LOOK_SENSITIVITY = 0.006; // radians per screen-pixel of drag
-const MAX_PITCH = Math.PI / 2 - 0.05;
 const JOYSTICK_RADIUS = 40;
 
 const FLOOR_COLOR = "#7C5A38";
@@ -233,6 +240,7 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
     // world +z so the floor lines up with the walls (a -90° rotation would
     // mirror it in z, which only shows up in non-rectangular rooms).
     const shapePts = roomPolygon.map((f) => new THREE.Vector2(f.x, f.z));
+    let ceilingMesh = null; // exposed so the dollhouse/top views can hide it
     if (shapePts.length >= 3) {
         const shape = new THREE.Shape(shapePts);
 
@@ -261,6 +269,7 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
             })
         );
         scene.add(ceiling);
+        ceilingMesh = ceiling;
     }
 
     // Shared source texture for walls — cloned per panel so each can tile it
@@ -305,6 +314,11 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
         });
     };
 
+    // Per-wall records for the screen: the meshes each wall produced (so the
+    // dollhouse view can lower walls facing the camera), its frame, and the
+    // solid spans between doorways (for the floor occlusion strips).
+    const wallParts = [];
+
     // Walls: each drawn segment is rebuilt as a set of boxes around its
     // openings — a floor-to-header gap for doors, a sill-to-header gap (with
     // a glass pane) for windows — plus a baseboard interrupted at doorways.
@@ -318,6 +332,7 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
         const angle = Math.atan2(b.z - a.z, b.x - a.x);
         const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
         const dir = { x: (b.x - a.x) / L, z: (b.z - a.z) / L };
+        const firstChild = scene.children.length;
 
         // Place a mesh at local offset `cu` (feet along the wall from its
         // midpoint) and world height `cy`, oriented along the wall.
@@ -500,6 +515,25 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
                 cc = Math.max(cc, o.u1);
             });
         if (cc < L / 2) pushSeg(cc, L / 2);
+
+        const solidSpans = [];
+        let sc = -L / 2;
+        openings
+            .filter((o) => o.floorGap)
+            .forEach((o) => {
+                if (o.u0 > sc) solidSpans.push([sc, o.u0]);
+                sc = Math.max(sc, o.u1);
+            });
+        if (sc < L / 2) solidSpans.push([sc, L / 2]);
+        wallParts.push({
+            objects: scene.children.slice(firstChild),
+            mid,
+            dir,
+            n: { x: -dir.z, z: dir.x },
+            angle,
+            thickness,
+            solidSpans,
+        });
     });
 
     // Furniture placed in the 2D plan, built from the shared catalog in the
@@ -548,14 +582,52 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
         doors,
         collisionSegments,
         furnitureColliders,
+        wallParts,
+        ceilingMesh,
+        pendant: [cord, shade],
+        roomPolygon,
+        toFeet,
     };
 };
 
-// First-person 3D walkthrough of the traced room: drag anywhere to look
-// around, drag the on-screen stick to walk in that direction.
+// Bounding box of the room outline in world feet.
+const roomBounds = (pts, fallback) => {
+    if (!pts || pts.length < 3) {
+        return { minX: fallback.x - 6, maxX: fallback.x + 6, minZ: fallback.z - 6, maxZ: fallback.z + 6 };
+    }
+    const xs = pts.map((p) => p.x);
+    const zs = pts.map((p) => p.z);
+    return {
+        minX: Math.min(...xs),
+        maxX: Math.max(...xs),
+        minZ: Math.min(...zs),
+        maxZ: Math.max(...zs),
+    };
+};
+
+const MODES = [
+    { key: "orbit", label: "Orbit", icon: "cube-outline" },
+    { key: "top", label: "Top", icon: "map-outline" },
+    { key: "walk", label: "Walk", icon: "walk-outline" },
+];
+
+const HINTS = {
+    orbit: "Drag to spin · Pinch to zoom · Two fingers to move · Double-tap to focus",
+    top: "Drag to move · Pinch to zoom · Double-tap to focus",
+    walk: "Drag to look around · Use the stick to walk · Double-tap the floor to go there",
+};
+const HINTS_KEY = "room3d.hintsSeen.v1";
+const HINT_MS = 4200;
+const DOUBLE_TAP_MS = 300;
+const TAP_SLOP = 10;
+
+// 3D view of the plan with three camera modes — Orbit (dollhouse, default),
+// Top (plan view) and Walk (first person) — plus soft shadows, a sky and a
+// render-on-demand loop that stops drawing when nothing moves.
 export const Room3DScreen = ({ navigation, route }) => {
     const walls = route.params?.walls ?? [];
     const furniture = route.params?.furniture ?? [];
+    const planName = route.params?.name;
 
     // Explicit, synchronously-available numeric dimensions for the GL
     // surface. gl.drawingBufferWidth/Height (and even RN's own onLayout on
@@ -563,19 +635,30 @@ export const Room3DScreen = ({ navigation, route }) => {
     // timing — driving the renderer/camera from this hook instead sidesteps
     // that whole class of bug.
     const { width: winWidth, height: winHeight } = useWindowDimensions();
+    const winRef = useRef({ w: winWidth, h: winHeight });
+    winRef.current = { w: winWidth, h: winHeight };
 
-    const yawRef = useRef(0);
-    const pitchRef = useRef(0);
-    const lookStartRef = useRef(null);
-    const walkVecRef = useRef({ x: 0, y: 0 }); // x: strafe, y: forward (-1..1)
+    const [mode, setModeState] = useState("orbit");
+    const modeRef = useRef("orbit");
+    const [ready, setReady] = useState(false);
+    const [hint, setHint] = useState(null);
     const [glError, setGlError] = useState(null);
 
+    const rigRef = useRef(null);
+    const dirtyRef = useRef(true); // force a redraw on the next frame
+    const floorTapRef = useRef(null); // (screenX, screenY) → world floor tap, set once GL is up
     const resizeHandlerRef = useRef(null);
     const glCleanupRef = useRef(null);
     const unmountedRef = useRef(false);
+    const hintsSeenRef = useRef({});
+    const hintTimer = useRef(null);
+    const hintOpacity = useRef(new Animated.Value(0)).current;
+    const loaderOpacity = useRef(new Animated.Value(1)).current;
+
     useEffect(() => {
         return () => {
             unmountedRef.current = true;
+            clearTimeout(hintTimer.current);
             // Free the scene's geometries/materials/textures and the renderer so
             // the 3D view's memory is released when you leave it.
             glCleanupRef.current?.();
@@ -589,48 +672,156 @@ export const Room3DScreen = ({ navigation, route }) => {
         resizeHandlerRef.current?.(winWidth, winHeight);
     }, [winWidth, winHeight]);
 
-    const lookResponder = useRef(
+    // --- hints: shown once per mode (remembered across launches) ---------
+    const showHint = (m) => {
+        if (hintsSeenRef.current[m]) return;
+        hintsSeenRef.current = { ...hintsSeenRef.current, [m]: true };
+        AsyncStorage.setItem(HINTS_KEY, JSON.stringify(hintsSeenRef.current)).catch(() => {});
+        clearTimeout(hintTimer.current);
+        setHint(HINTS[m]);
+        Animated.timing(hintOpacity, { toValue: 1, duration: 250, useNativeDriver: true }).start();
+        hintTimer.current = setTimeout(() => {
+            Animated.timing(hintOpacity, { toValue: 0, duration: 400, useNativeDriver: true }).start(
+                () => !unmountedRef.current && setHint(null)
+            );
+        }, HINT_MS);
+    };
+
+    useEffect(() => {
+        AsyncStorage.getItem(HINTS_KEY)
+            .then((raw) => {
+                try {
+                    hintsSeenRef.current = raw ? JSON.parse(raw) : {};
+                } catch {
+                    hintsSeenRef.current = {};
+                }
+            })
+            .catch(() => {})
+            .finally(() => !unmountedRef.current && showHint("orbit"));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Fade the "Building your room…" overlay out after the first frame.
+    useEffect(() => {
+        if (ready) {
+            Animated.timing(loaderOpacity, { toValue: 0, duration: 350, useNativeDriver: true }).start();
+        }
+    }, [ready, loaderOpacity]);
+
+    const changeMode = (m) => {
+        if (m === mode) return;
+        setModeState(m);
+        modeRef.current = m;
+        rigRef.current?.setMode(m);
+        dirtyRef.current = true;
+        showHint(m);
+    };
+
+    const resetView = () => {
+        rigRef.current?.reset();
+        dirtyRef.current = true;
+    };
+
+    // --- gestures on the 3D surface ----------------------------------------
+    // One finger: orbit / pan / look (by mode). Two fingers: pinch + pan.
+    // Quick double tap: focus (orbit/top) or glide there (walk).
+    const gestureRef = useRef(null);
+    const lastTapRef = useRef({ t: 0, x: 0, y: 0 });
+
+    const touchPoints = (e) =>
+        (e.nativeEvent.touches || []).map((t) => ({ x: t.pageX, y: t.pageY, lx: t.locationX, ly: t.locationY }));
+
+    const surfaceResponder = useRef(
         PanResponder.create({
             onStartShouldSetPanResponder: () => true,
             onMoveShouldSetPanResponder: () => true,
+            onPanResponderTerminationRequest: () => false,
             onPanResponderGrant: (e) => {
-                lookStartRef.current = {
-                    x: e.nativeEvent.pageX,
-                    y: e.nativeEvent.pageY,
-                    yaw: yawRef.current,
-                    pitch: pitchRef.current,
+                const pts = touchPoints(e);
+                const p = pts[0] || { x: e.nativeEvent.pageX, y: e.nativeEvent.pageY };
+                gestureRef.current = {
+                    start: { x: p.x, y: p.y, lx: e.nativeEvent.locationX, ly: e.nativeEvent.locationY },
+                    last: { x: p.x, y: p.y },
+                    lastT: Date.now(),
+                    vx: 0,
+                    moved: 0,
+                    multi: false,
+                    pinch: null,
+                    t0: Date.now(),
                 };
             },
             onPanResponderMove: (e) => {
-                const s = lookStartRef.current;
-                if (!s) return;
-                const dx = e.nativeEvent.pageX - s.x;
-                const dy = e.nativeEvent.pageY - s.y;
-                yawRef.current = s.yaw - dx * LOOK_SENSITIVITY;
-                pitchRef.current = Math.max(
-                    -MAX_PITCH,
-                    Math.min(MAX_PITCH, s.pitch - dy * LOOK_SENSITIVITY)
-                );
+                const g = gestureRef.current;
+                const rig = rigRef.current;
+                if (!g || !rig) return;
+                const pts = touchPoints(e);
+                const h = winRef.current.h;
+                if (pts.length >= 2) {
+                    const [a, b] = pts;
+                    const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+                    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+                    if (g.pinch) {
+                        rig.zoom(g.pinch.dist / dist);
+                        rig.pan(mid.x - g.pinch.mid.x, mid.y - g.pinch.mid.y, h);
+                    }
+                    g.pinch = { dist, mid };
+                    g.multi = true;
+                    g.moved = Infinity;
+                    dirtyRef.current = true;
+                    return;
+                }
+                if (pts.length !== 1) return;
+                const p = pts[0];
+                if (g.pinch) {
+                    // Pinch winding down to one finger: restart from here
+                    // instead of jumping.
+                    g.pinch = null;
+                    g.last = { x: p.x, y: p.y };
+                    return;
+                }
+                const dx = p.x - g.last.x;
+                const dy = p.y - g.last.y;
+                const now = Date.now();
+                const dt = Math.max(1, now - g.lastT) / 1000;
+                g.vx = g.vx * 0.6 + (dx / dt) * 0.4;
+                g.last = { x: p.x, y: p.y };
+                g.lastT = now;
+                g.moved = Math.max(g.moved, Math.hypot(p.x - g.start.x, p.y - g.start.y));
+                rig.drag(dx, dy, h);
+                dirtyRef.current = true;
             },
             onPanResponderRelease: () => {
-                lookStartRef.current = null;
+                const g = gestureRef.current;
+                gestureRef.current = null;
+                const rig = rigRef.current;
+                if (!g || !rig) return;
+                const isTap = !g.multi && g.moved < TAP_SLOP && Date.now() - g.t0 < 350;
+                if (isTap) {
+                    const last = lastTapRef.current;
+                    const now = Date.now();
+                    if (
+                        now - last.t < DOUBLE_TAP_MS &&
+                        Math.hypot(g.start.x - last.x, g.start.y - last.y) < 40
+                    ) {
+                        floorTapRef.current?.(g.start.lx, g.start.ly);
+                        lastTapRef.current = { t: 0, x: 0, y: 0 };
+                    } else {
+                        lastTapRef.current = { t: now, x: g.start.x, y: g.start.y };
+                    }
+                    return;
+                }
+                // Let an orbit spin coast if the finger was still moving.
+                if (!g.multi && Date.now() - g.lastT < 80) rig.fling(g.vx);
+                dirtyRef.current = true;
+            },
+            onPanResponderTerminate: () => {
+                gestureRef.current = null;
             },
         })
     ).current;
 
     const onContextCreate = async (gl) => {
         try {
-            console.log(
-                "Room3D: context created, gl buffer",
-                gl.drawingBufferWidth,
-                gl.drawingBufferHeight,
-                "using window size",
-                winWidth,
-                winHeight,
-                "walls:",
-                walls.length
-            );
-
             // Must match the GLView's native drawing-buffer scale so the scene
             // fills the whole buffer (the buffer is already allocated at this
             // resolution; rendering smaller would just letterbox into a corner).
@@ -638,14 +829,15 @@ export const Room3DScreen = ({ navigation, route }) => {
             const renderer = new Renderer({ gl });
             renderer.setPixelRatio(pixelRatio);
             renderer.setSize(winWidth, winHeight);
-            renderer.setClearColor("#DFE3E8");
-            // Correct color pipeline: our textures/colors are authored in
-            // sRGB, so the renderer must encode its output the same way —
-            // without this the whole scene looks flat and washed out.
+            renderer.setClearColor(HORIZON);
+            // Our textures/colors are authored in sRGB; filmic tone mapping
+            // rolls off bright highlights (lamps, white walls) gracefully and
+            // gives richer contrast at no measurable cost.
             renderer.outputEncoding = THREE.sRGBEncoding;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 0.95;
 
-            const maxAnisotropy =
-                renderer.capabilities?.getMaxAnisotropy?.() ?? 1;
+            const maxAnisotropy = renderer.capabilities?.getMaxAnisotropy?.() ?? 1;
             const {
                 scene,
                 ceilingHeight,
@@ -653,7 +845,18 @@ export const Room3DScreen = ({ navigation, route }) => {
                 doors,
                 collisionSegments,
                 furnitureColliders,
+                wallParts,
+                ceilingMesh,
+                pendant,
+                roomPolygon,
+                toFeet,
             } = buildScene(walls, { maxAnisotropy, furniture });
+
+            const disposeEnv = addEnvironment(scene);
+            addFurnitureShadows(scene, furniture, toFeet);
+            addWallOcclusion(scene, wallParts);
+            const wallGroups = groupWalls(scene, wallParts, roomCenter);
+
             // Furniture you'd bump into blocks walking too — except any piece
             // the camera starts inside (e.g. a table at the room's center),
             // which would otherwise trap you.
@@ -661,22 +864,10 @@ export const Room3DScreen = ({ navigation, route }) => {
                 .filter((c) => !insideCollider(c, roomCenter.x, roomCenter.z))
                 .flatMap((c) => c.segs);
             const blocked = (x, z) =>
-                collisionSegments.some(
-                    (s) => distanceToWallSegment(x, z, s) < WALL_COLLIDE_MARGIN
-                ) ||
-                furnitureSegments.some(
-                    (s) => distanceToWallSegment(x, z, s) < FURNITURE_COLLIDE_MARGIN
-                );
-            console.log(
-                "Room3D: scene built, children:",
-                scene.children.length,
-                "roomCenter:",
-                roomCenter
-            );
+                collisionSegments.some((sg) => distanceToWallSegment(x, z, sg) < WALL_COLLIDE_MARGIN) ||
+                furnitureSegments.some((sg) => distanceToWallSegment(x, z, sg) < FURNITURE_COLLIDE_MARGIN);
 
-            // Release every GPU/CPU resource when the screen unmounts. Shared
-            // materials get disposed more than once (harmless), and each mesh's
-            // texture (incl. per-wall clones) is freed via material.map.
+            // Release every GPU/CPU resource when the screen unmounts.
             glCleanupRef.current = () => {
                 try {
                     scene.traverse((obj) => {
@@ -689,38 +880,55 @@ export const Room3DScreen = ({ navigation, route }) => {
                             m.dispose?.();
                         }
                     });
+                    disposeEnv();
                     renderer.dispose?.();
                 } catch (e) {
                     // best-effort cleanup
                 }
             };
 
-            const camera = new THREE.PerspectiveCamera(
-                70,
-                winWidth / winHeight,
-                0.05,
-                1000
-            );
-            camera.rotation.order = "YXZ";
-            camera.position.set(
-                roomCenter.x,
-                Math.min(EYE_HEIGHT_FT, ceilingHeight - 0.5),
-                roomCenter.z
-            );
+            const rig = createCameraRig({
+                bounds: roomBounds(roomPolygon, roomCenter),
+                roomCenter,
+                ceilingHeight,
+                blocked,
+                aspect: winWidth / winHeight,
+            });
+            rig.setMode(modeRef.current);
+            rigRef.current = rig;
 
-            // If a real layout event arrives after this (or with a
-            // different size than our fallback guess), resize live.
+            const camera = new THREE.PerspectiveCamera(rig.fov, winWidth / winHeight, 0.05, 600);
+
             resizeHandlerRef.current = (width, height) => {
                 renderer.setSize(width, height);
                 camera.aspect = width / height;
                 camera.updateProjectionMatrix();
+                rig.setAspect(width / height);
+                dirtyRef.current = true;
             };
 
-            const forward = new THREE.Vector3();
-            const right = new THREE.Vector3();
+            // Double-tap → the point on the floor under the finger.
+            const raycaster = new THREE.Raycaster();
+            const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+            const hit = new THREE.Vector3();
+            floorTapRef.current = (sx, sy) => {
+                const { w, h } = winRef.current;
+                raycaster.setFromCamera(new THREE.Vector2((sx / w) * 2 - 1, -(sy / h) * 2 + 1), camera);
+                if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+                    rig.floorTap(hit.x, hit.z);
+                    dirtyRef.current = true;
+                }
+            };
+
             let last = Date.now();
             const openStart = Date.now();
+            let doorsDone = doors.length === 0;
             let stopped = false;
+            let firstFrame = true;
+            let shownMode = null;
+            const lastPos = new THREE.Vector3(Infinity, 0, 0);
+            const lastLook = new THREE.Vector3();
+            let lastFov = 0;
 
             const loop = () => {
                 if (stopped || unmountedRef.current) return;
@@ -730,51 +938,58 @@ export const Room3DScreen = ({ navigation, route }) => {
                     const dt = Math.min(0.1, (now - last) / 1000);
                     last = now;
 
+                    rig.update(dt);
+                    let needsDraw = dirtyRef.current || rig.busy;
+
+                    // Ceiling and pendant only make sense from inside.
+                    if (shownMode !== rig.mode) {
+                        shownMode = rig.mode;
+                        const inside = rig.mode === "walk";
+                        if (ceilingMesh) ceilingMesh.visible = inside;
+                        pendant.forEach((m) => (m.visible = inside));
+                        needsDraw = true;
+                    }
+
                     // Swing doors open once on entry (ease-out cubic).
-                    if (doors.length) {
+                    if (!doorsDone) {
                         const p = Math.min(1, (now - openStart) / DOOR_OPEN_MS);
                         const eased = 1 - Math.pow(1 - p, 3);
-                        for (const d of doors) {
-                            d.pivot.rotation.y = d.base + d.target * eased;
-                        }
+                        for (const d of doors) d.pivot.rotation.y = d.base + d.target * eased;
+                        doorsDone = p >= 1;
+                        needsDraw = true;
                     }
 
-                    camera.rotation.set(pitchRef.current, yawRef.current, 0, "YXZ");
+                    if (updateWallCutaway(wallGroups, rig.mode, rig.pos, dt)) needsDraw = true;
 
-                    const walk = walkVecRef.current;
-                    if (walk.x !== 0 || walk.y !== 0) {
-                        camera.getWorldDirection(forward);
-                        forward.y = 0;
-                        if (forward.lengthSq() > 0) forward.normalize();
-                        right.crossVectors(forward, camera.up).normalize();
-
-                        const step = WALK_SPEED * dt;
-                        const moveX =
-                            -walk.y * forward.x * step + walk.x * right.x * step;
-                        const moveZ =
-                            -walk.y * forward.z * step + walk.x * right.z * step;
-
-                        const curX = camera.position.x;
-                        const curZ = camera.position.z;
-                        const nextX = curX + moveX;
-                        const nextZ = curZ + moveZ;
-
-                        // Bump into solid walls, but walk freely through door
-                        // gaps (and anywhere with no wall). Try the full move,
-                        // else slide along whichever single axis is still clear
-                        // rather than freezing against the wall.
-                        if (!blocked(nextX, nextZ)) {
-                            camera.position.x = nextX;
-                            camera.position.z = nextZ;
-                        } else if (!blocked(nextX, curZ)) {
-                            camera.position.x = nextX;
-                        } else if (!blocked(curX, nextZ)) {
-                            camera.position.z = nextZ;
-                        }
+                    // Render on demand: skip the frame entirely when the
+                    // camera hasn't moved and nothing is animating — the
+                    // last frame stays on screen and the GPU idles.
+                    if (
+                        lastPos.distanceToSquared(rig.pos) > 1e-7 ||
+                        lastLook.distanceToSquared(rig.look) > 1e-7 ||
+                        Math.abs(lastFov - rig.fov) > 1e-3
+                    ) {
+                        needsDraw = true;
                     }
+                    if (!needsDraw) return;
+                    dirtyRef.current = false;
+
+                    camera.position.copy(rig.pos);
+                    camera.lookAt(rig.look);
+                    if (Math.abs(camera.fov - rig.fov) > 1e-3) {
+                        camera.fov = rig.fov;
+                        camera.updateProjectionMatrix();
+                    }
+                    lastPos.copy(rig.pos);
+                    lastLook.copy(rig.look);
+                    lastFov = rig.fov;
 
                     renderer.render(scene, camera);
                     gl.endFrameEXP();
+                    if (firstFrame) {
+                        firstFrame = false;
+                        setReady(true);
+                    }
                 } catch (err) {
                     stopped = true;
                     console.error("Room3D render loop error:", err);
@@ -787,14 +1002,15 @@ export const Room3DScreen = ({ navigation, route }) => {
             console.error("Room3D setup error:", err);
             report(err, { feature: "3d", phase: "setup" });
             setGlError(`setup: ${err?.message ?? err}`);
+            setReady(true);
         }
     };
 
     return (
-        <SafeAreaView style={styles.safeArea} edges={["top"]}>
+        <View style={styles.root}>
             <View
                 style={[styles.glWrap, { width: winWidth, height: winHeight }]}
-                {...lookResponder.panHandlers}
+                {...surfaceResponder.panHandlers}
             >
                 <GLView
                     style={{ width: winWidth, height: winHeight }}
@@ -803,99 +1019,185 @@ export const Room3DScreen = ({ navigation, route }) => {
                 />
             </View>
 
+            {/* Loading overlay until the first frame is drawn */}
+            <Animated.View
+                pointerEvents={ready ? "none" : "auto"}
+                style={[styles.loader, { opacity: loaderOpacity }]}
+            >
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={styles.loaderText}>Building your room…</Text>
+            </Animated.View>
+
             {walls.length === 0 && (
                 <View style={styles.centerMessage} pointerEvents="none">
-                    <Text style={styles.centerMessageText}>
-                        No room data was passed to this screen.
-                    </Text>
+                    <Text style={styles.centerMessageText}>No room data was passed to this screen.</Text>
                 </View>
             )}
 
-            {glError && (
-                <View style={styles.errorBox} pointerEvents="none">
-                    <Text style={styles.errorText}>{glError}</Text>
+            <SafeAreaView style={styles.overlay} edges={["top", "bottom"]} pointerEvents="box-none">
+                {/* Top bar: close, plan name, mode switch */}
+                <View style={styles.topBar} pointerEvents="box-none">
+                    <View style={styles.titleRow} pointerEvents="box-none">
+                        <AnimatedPressable
+                            onPress={() => navigation.goBack()}
+                            scaleTo={0.85}
+                            style={styles.roundButton}
+                            hitSlop={8}
+                        >
+                            <Ionicons name="close" size={22} color="#FFFFFF" />
+                        </AnimatedPressable>
+                        <View style={styles.titlePill}>
+                            <Text style={styles.titleText} numberOfLines={1}>
+                                {planName || "3D view"}
+                            </Text>
+                        </View>
+                        <View style={styles.roundSpacer} />
+                    </View>
+
+                    <View style={styles.segment}>
+                        {MODES.map((m) => {
+                            const active = m.key === mode;
+                            return (
+                                <AnimatedPressable
+                                    key={m.key}
+                                    onPress={() => changeMode(m.key)}
+                                    scaleTo={0.94}
+                                    style={[styles.segmentItem, active && styles.segmentItemActive]}
+                                >
+                                    <Ionicons
+                                        name={m.icon}
+                                        size={16}
+                                        color={active ? colors.text : "#FFFFFF"}
+                                    />
+                                    <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+                                        {m.label}
+                                    </Text>
+                                </AnimatedPressable>
+                            );
+                        })}
+                    </View>
                 </View>
-            )}
 
-            {/* Header */}
-            <View style={styles.header}>
-                <AnimatedPressable
-                    onPress={() => navigation.goBack()}
-                    scaleTo={0.85}
-                    style={styles.iconButton}
-                    hitSlop={8}
-                >
-                    <Ionicons name="close" size={26} color="#FFFFFF" />
-                </AnimatedPressable>
-            </View>
+                {glError && (
+                    <View style={styles.errorBox} pointerEvents="none">
+                        <Text style={styles.errorText}>{glError}</Text>
+                    </View>
+                )}
 
-            {/* Bottom controls */}
-            <View style={styles.bottomBar} pointerEvents="box-none">
-                <AnimatedPressable
-                    onPress={() => navigation.goBack()}
-                    scaleTo={0.9}
-                    style={styles.tool}
-                >
-                    <Text style={styles.twoD}>2D</Text>
-                    <Text style={styles.toolLabel}>Open 2D plan</Text>
-                </AnimatedPressable>
+                <View style={styles.flexSpacer} pointerEvents="none" />
 
-                <Joystick onChange={(v) => (walkVecRef.current = v)} />
+                {/* First-time hint for the current mode */}
+                {hint && (
+                    <Animated.View style={[styles.hint, { opacity: hintOpacity }]} pointerEvents="none">
+                        <Ionicons name="hand-left-outline" size={15} color="#FFFFFF" />
+                        <Text style={styles.hintText}>{hint}</Text>
+                    </Animated.View>
+                )}
 
-                {/* Spacer keeps the joystick centered opposite the 2D button */}
-                <View style={styles.tool} />
-            </View>
-        </SafeAreaView>
+                {/* Bottom bar: 2D, joystick (walk only), reset */}
+                <View style={styles.bottomBar} pointerEvents="box-none">
+                    <AnimatedPressable
+                        onPress={() => navigation.goBack()}
+                        scaleTo={0.9}
+                        style={styles.toolPill}
+                    >
+                        <Text style={styles.twoD}>2D</Text>
+                        <Text style={styles.toolLabel}>Plan</Text>
+                    </AnimatedPressable>
+
+                    {mode === "walk" ? (
+                        <Joystick
+                            onChange={(v) => {
+                                rigRef.current?.setStick(v);
+                                dirtyRef.current = true;
+                            }}
+                        />
+                    ) : (
+                        <View style={styles.stickSpacer} />
+                    )}
+
+                    <AnimatedPressable onPress={resetView} scaleTo={0.9} style={styles.toolPill}>
+                        <Ionicons name="scan-outline" size={22} color="#FFFFFF" />
+                        <Text style={styles.toolLabel}>Reset</Text>
+                    </AnimatedPressable>
+                </View>
+            </SafeAreaView>
+        </View>
     );
 };
 
 // Draggable walk stick. The knob's visual offset is driven by an Animated
 // value (so dragging never triggers a screen re-render); the normalized
 // direction is reported to the parent via `onChange` for the render loop.
+// The rig applies the deadzone and response curve.
 const Joystick = ({ onChange }) => {
     const anim = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
 
     const responder = useRef(
         PanResponder.create({
             onStartShouldSetPanResponder: () => true,
             onMoveShouldSetPanResponder: () => true,
+            onPanResponderTerminationRequest: () => false,
             onPanResponderMove: (_e, gs) => {
                 const d = Math.hypot(gs.dx, gs.dy);
                 const clamped = d > JOYSTICK_RADIUS ? JOYSTICK_RADIUS / d : 1;
                 const kx = gs.dx * clamped;
                 const ky = gs.dy * clamped;
                 anim.setValue({ x: kx, y: ky });
-                onChange({ x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS });
+                onChangeRef.current({ x: kx / JOYSTICK_RADIUS, y: ky / JOYSTICK_RADIUS });
             },
             onPanResponderRelease: () => {
+                Animated.spring(anim, { toValue: { x: 0, y: 0 }, useNativeDriver: true, friction: 6 }).start();
+                onChangeRef.current({ x: 0, y: 0 });
+            },
+            onPanResponderTerminate: () => {
                 anim.setValue({ x: 0, y: 0 });
-                onChange({ x: 0, y: 0 });
+                onChangeRef.current({ x: 0, y: 0 });
             },
         })
     ).current;
 
     return (
         <View style={styles.stickBase} {...responder.panHandlers}>
-            <Ionicons name="chevron-up" size={14} color="rgba(255,255,255,0.7)" style={styles.stickChevronUp} />
-            <Animated.View
-                style={[styles.stickKnob, { transform: anim.getTranslateTransform() }]}
-            >
-                <Text style={styles.stickLabel}>360°</Text>
+            <Ionicons name="chevron-up" size={14} color="rgba(255,255,255,0.75)" style={styles.stickChevronUp} />
+            <Ionicons name="chevron-down" size={14} color="rgba(255,255,255,0.75)" style={styles.stickChevronDown} />
+            <Ionicons name="chevron-back" size={14} color="rgba(255,255,255,0.75)" style={styles.stickChevronLeft} />
+            <Ionicons name="chevron-forward" size={14} color="rgba(255,255,255,0.75)" style={styles.stickChevronRight} />
+            <Animated.View style={[styles.stickKnob, { transform: anim.getTranslateTransform() }]}>
+                <Ionicons name="walk" size={20} color="#FFFFFF" />
             </Animated.View>
-            <Ionicons name="chevron-down" size={14} color="rgba(255,255,255,0.7)" style={styles.stickChevronDown} />
         </View>
     );
 };
 
+const GLASS = "rgba(17,24,39,0.58)"; // translucent dark for controls over a light sky
+
 const styles = StyleSheet.create({
-    safeArea: {
+    root: {
         flex: 1,
-        backgroundColor: "#000000",
+        backgroundColor: HORIZON,
     },
     glWrap: {
         position: "absolute",
         top: 0,
         left: 0,
+    },
+    overlay: {
+        ...StyleSheet.absoluteFillObject,
+    },
+    loader: {
+        ...StyleSheet.absoluteFillObject,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#EEF1F5",
+    },
+    loaderText: {
+        marginTop: 14,
+        fontSize: 15,
+        fontWeight: "600",
+        color: colors.textMuted,
     },
     centerMessage: {
         ...StyleSheet.absoluteFillObject,
@@ -904,16 +1206,14 @@ const styles = StyleSheet.create({
         paddingHorizontal: 40,
     },
     centerMessageText: {
-        color: "rgba(255,255,255,0.8)",
+        color: colors.textMuted,
         fontSize: 15,
         fontWeight: "600",
         textAlign: "center",
     },
     errorBox: {
-        position: "absolute",
-        top: 60,
-        left: 16,
-        right: 16,
+        marginTop: 12,
+        marginHorizontal: 16,
         backgroundColor: "rgba(200,30,30,0.92)",
         borderRadius: 12,
         padding: 14,
@@ -923,99 +1223,142 @@ const styles = StyleSheet.create({
         fontSize: 13,
         fontWeight: "600",
     },
-    header: {
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
+    topBar: {
         paddingHorizontal: 12,
-        paddingVertical: 6,
+        paddingTop: 6,
+        alignItems: "center",
     },
-    headerRight: {
-        flexDirection: "row",
-    },
-    iconButton: {
-        paddingHorizontal: 9,
-        paddingVertical: 6,
-        borderRadius: radius.pill,
-    },
-    searchRow: {
-        position: "absolute",
-        right: 16,
-        bottom: 118,
-        alignItems: "flex-end",
-    },
-    searchPill: {
+    titleRow: {
         flexDirection: "row",
         alignItems: "center",
-        backgroundColor: "rgba(255,255,255,0.85)",
-        borderRadius: radius.pill,
-        paddingHorizontal: 14,
-        paddingVertical: 9,
+        alignSelf: "stretch",
+        justifyContent: "space-between",
     },
-    searchText: {
+    roundButton: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        backgroundColor: GLASS,
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    roundSpacer: {
+        width: 40,
+    },
+    titlePill: {
+        flexShrink: 1,
+        marginHorizontal: 10,
+        paddingHorizontal: 14,
+        height: 32,
+        borderRadius: radius.pill,
+        backgroundColor: GLASS,
+        justifyContent: "center",
+    },
+    titleText: {
+        color: "#FFFFFF",
         fontSize: 14,
-        fontWeight: "600",
-        color: colors.textMuted,
+        fontWeight: "700",
+    },
+    segment: {
+        flexDirection: "row",
+        marginTop: 10,
+        padding: 4,
+        borderRadius: radius.pill,
+        backgroundColor: GLASS,
+    },
+    segmentItem: {
+        flexDirection: "row",
+        alignItems: "center",
+        paddingHorizontal: 14,
+        height: 34,
+        borderRadius: radius.pill,
+    },
+    segmentItemActive: {
+        backgroundColor: "#FFFFFF",
+    },
+    segmentText: {
         marginLeft: 6,
+        fontSize: 13,
+        fontWeight: "700",
+        color: "#FFFFFF",
+    },
+    segmentTextActive: {
+        color: colors.text,
+    },
+    flexSpacer: {
+        flex: 1,
+    },
+    hint: {
+        flexDirection: "row",
+        alignItems: "center",
+        alignSelf: "center",
+        maxWidth: "88%",
+        marginBottom: 14,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderRadius: radius.lg,
+        backgroundColor: GLASS,
+    },
+    hintText: {
+        marginLeft: 8,
+        flexShrink: 1,
+        color: "#FFFFFF",
+        fontSize: 13,
+        fontWeight: "600",
     },
     bottomBar: {
-        position: "absolute",
-        left: 0,
-        right: 0,
-        bottom: 0,
         flexDirection: "row",
         alignItems: "flex-end",
         justifyContent: "space-between",
-        paddingHorizontal: 28,
-        paddingBottom: 30,
-        paddingTop: 8,
+        paddingHorizontal: 20,
+        paddingBottom: 14,
+        paddingTop: 4,
     },
-    tool: {
+    toolPill: {
+        width: 72,
+        height: 64,
+        borderRadius: radius.lg,
+        backgroundColor: GLASS,
         alignItems: "center",
-        minWidth: 72,
+        justifyContent: "center",
     },
     twoD: {
-        fontSize: 24,
+        fontSize: 20,
         fontWeight: "900",
         color: "#FFFFFF",
-        lineHeight: 28,
+        lineHeight: 24,
     },
     toolLabel: {
         fontSize: 12,
         fontWeight: "600",
         color: "#FFFFFF",
-        marginTop: 4,
-        textAlign: "center",
+        marginTop: 2,
+    },
+    stickSpacer: {
+        width: 96,
     },
     stickBase: {
-        width: 84,
-        height: 84,
-        borderRadius: 42,
-        backgroundColor: "rgba(0,0,0,0.4)",
+        width: 96,
+        height: 96,
+        borderRadius: 48,
+        backgroundColor: GLASS,
+        borderWidth: 1,
+        borderColor: "rgba(255,255,255,0.25)",
         alignItems: "center",
         justifyContent: "center",
     },
     stickKnob: {
-        width: 52,
-        height: 52,
-        borderRadius: 26,
-        backgroundColor: "rgba(20,20,20,0.85)",
-        borderWidth: 1,
-        borderColor: "rgba(255,255,255,0.4)",
+        width: 50,
+        height: 50,
+        borderRadius: 25,
+        backgroundColor: colors.primary,
+        borderWidth: 2,
+        borderColor: "rgba(255,255,255,0.85)",
         alignItems: "center",
         justifyContent: "center",
     },
-    stickLabel: {
-        fontSize: 11,
-        fontWeight: "700",
-        color: "#FFFFFF",
-    },
-    stickChevronUp: {
-        position: "absolute",
-        top: 2,
-    },
-    stickChevronDown: {
-        position: "absolute",
-        bottom: 2,
-    },
+    stickChevronUp: { position: "absolute", top: 4 },
+    stickChevronDown: { position: "absolute", bottom: 4 },
+    stickChevronLeft: { position: "absolute", left: 4 },
+    stickChevronRight: { position: "absolute", right: 4 },
 });

@@ -1963,7 +1963,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                             ? setWarningVisible(true)
                             : hasClash
                             ? setClashWarningVisible(true)
-                            : navigation.navigate("Room3D", { walls, furniture })
+                            : navigation.navigate("Room3D", { walls, furniture, name })
                     }
                     scaleTo={0.9}
                     style={styles.tool}
