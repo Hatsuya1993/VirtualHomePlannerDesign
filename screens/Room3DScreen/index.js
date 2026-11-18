@@ -21,6 +21,8 @@ import { buildFurniture, insideCollider } from "../../utils/furniture3D";
 import { floorsFromParams, floorShortLabel } from "../../utils/floors";
 import { isStairs, stairLayout, stairVoidContent } from "../../utils/stairs";
 import { createStairWalker } from "./stairWalk";
+import { makeFinishFloorTexture, makeFinishWallTexture } from "./finishTextures";
+import { DEFAULT_FLOOR_FINISH, DEFAULT_WALL_COLOR, wallFinishOf } from "../../utils/finishes";
 import { createCameraRig } from "./cameraRig";
 import {
     addEnvironment,
@@ -198,7 +200,14 @@ const distanceToWallSegment = (x, z, s) => {
 // pendant light) from the 2D plan, in feet, centered on the room.
 const buildScene = (
     walls,
-    { maxAnisotropy = 1, furniture = [], origin = null, floorHoles = [], ceilingHoles = [] } = {}
+    {
+        maxAnisotropy = 1,
+        furniture = [],
+        origin = null,
+        floorHoles = [],
+        ceilingHoles = [],
+        floorFinish = DEFAULT_FLOOR_FINISH,
+    } = {}
 ) => {
     const scene = new THREE.Scene();
     // Door pivots to animate open in the render loop: { pivot, base, target }.
@@ -259,15 +268,21 @@ const buildScene = (
             return sh;
         };
         const shape = shapeWithHoles(floorHoles);
+        const customFloor =
+            floorFinish && floorFinish !== DEFAULT_FLOOR_FINISH
+                ? makeFinishFloorTexture(floorFinish, maxAnisotropy)
+                : null;
 
         const floorGeo = new THREE.ShapeGeometry(shape);
         floorGeo.rotateX(Math.PI / 2);
         const floor = new THREE.Mesh(
             floorGeo,
             new THREE.MeshStandardMaterial({
-                map: makeWoodFloorTexture(maxAnisotropy),
+                // The default oak floor keeps its original texture; other
+                // finishes come from finishTextures.js.
+                map: customFloor ? customFloor.tex : makeWoodFloorTexture(maxAnisotropy),
                 side: THREE.DoubleSide,
-                roughness: 0.6,
+                roughness: customFloor ? customFloor.roughness : 0.6,
                 metalness: 0.02,
             })
         );
@@ -330,6 +345,27 @@ const buildScene = (
         });
     };
 
+    // Walls with a finish picked in the Design sheet. Plain default paint
+    // keeps the original material above; each other finish's texture is made
+    // once and cloned per panel so it tiles at real-world size.
+    const finishTexCache = new Map();
+    const makeFinishWallMat = (finish, segLen, segH) => {
+        const key = `${finish.texture}|${finish.color}`;
+        let base = finishTexCache.get(key);
+        if (!base) {
+            base = makeFinishWallTexture(finish, maxAnisotropy);
+            finishTexCache.set(key, base);
+        }
+        const tex = base.tex.clone();
+        tex.needsUpdate = true;
+        tex.repeat.set(segLen / base.tileFt, segH / base.tileFt);
+        return new THREE.MeshStandardMaterial({ map: tex, side: THREE.DoubleSide, roughness: base.roughness });
+    };
+    const isDefaultWallFinish = (fin) =>
+        !fin ||
+        ((fin.texture ?? "paint") === "paint" &&
+            (fin.color ?? DEFAULT_WALL_COLOR).toLowerCase() === DEFAULT_WALL_COLOR.toLowerCase());
+
     // Per-wall records for the screen: the meshes each wall produced (so the
     // dollhouse view can lower walls facing the camera), its frame, and the
     // solid spans between doorways (for the floor occlusion strips).
@@ -362,7 +398,10 @@ const buildScene = (
             const segH = y1 - y0;
             if (segLen <= 0.002 || segH <= 0.002) return;
             const geo = new THREE.BoxGeometry(segLen, segH, thickness);
-            place(new THREE.Mesh(geo, makeWallMat(segLen, segH)), (u0 + u1) / 2, (y0 + y1) / 2);
+            const mat = isDefaultWallFinish(w.finish)
+                ? makeWallMat(segLen, segH)
+                : makeFinishWallMat(wallFinishOf(w), segLen, segH);
+            place(new THREE.Mesh(geo, mat), (u0 + u1) / 2, (y0 + y1) / 2);
         };
 
         // Openings as intervals along the wall (u from -L/2..L/2), clamped
@@ -677,6 +716,7 @@ const buildBuilding = (floors, { maxAnisotropy = 1 } = {}) => {
             origin,
             floorHoles: holesBelow,
             ceilingHoles: holesHere,
+            floorFinish: f.floorFinish,
         });
         // Move the floor's meshes into its group. Upper floors drop the
         // scene-wide fill lights (only one set is needed) but keep their

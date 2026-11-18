@@ -38,6 +38,7 @@ export const floorsFromParams = (params = {}) => {
             heightIn: f.heightIn || DEFAULT_FLOOR_HEIGHT_IN,
             walls: f.walls ?? [],
             furniture: f.furniture ?? [],
+            ...(f.floorFinish ? { floorFinish: f.floorFinish } : {}),
         }));
     }
     return [

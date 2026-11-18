@@ -72,6 +72,8 @@ import { FloorSheet } from "../../components/FloorSheet";
 import { defaultFloorName, floorsFromParams, makeFloor, outerWallsOf } from "../../utils/floors";
 import { isStairs, stairVoidContent } from "../../utils/stairs";
 import { StairEditSheet } from "../../components/StairEditSheet";
+import { DesignSheet } from "../../components/DesignSheet";
+import { DEFAULT_FLOOR_FINISH, floorPattern2D, wallFinishOf } from "../../utils/finishes";
 import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
@@ -286,6 +288,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     );
     const [floorSheetVisible, setFloorSheetVisible] = useState(false);
     const [stairEditVisible, setStairEditVisible] = useState(false);
+    const [designSheet, setDesignSheet] = useState(null); // null | "floor" | "walls" (opening tab)
     const [renamingFloor, setRenamingFloor] = useState(null); // floor index | null
     const svgRef = useRef(null);
 
@@ -452,8 +455,9 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             next.splice(
                 selectedWall,
                 1,
-                { x1: a.x, y1: a.y, x2: mid.x, y2: mid.y },
-                { x1: mid.x, y1: mid.y, x2: b.x, y2: b.y }
+                // Both halves keep the wall's finish.
+                { x1: a.x, y1: a.y, x2: mid.x, y2: mid.y, ...(w.finish ? { finish: w.finish } : {}) },
+                { x1: mid.x, y1: mid.y, x2: b.x, y2: b.y, ...(w.finish ? { finish: w.finish } : {}) }
             );
             return next;
         });
@@ -1363,6 +1367,34 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             maxY: Math.max(...ys),
         });
     }
+    // The floor level's finish. Oak (the default) is drawn exactly as before
+    // with the planks above; other finishes use their own pattern.
+    const floorFinishKey = floors[floorIndex]?.floorFinish || DEFAULT_FLOOR_FINISH;
+    const floorPattern =
+        floorPolygon && floorFinishKey !== DEFAULT_FLOOR_FINISH
+            ? floorPattern2D(
+                  floorFinishKey,
+                  {
+                      minX: Math.min(...floorPolygon.map((p) => p.x)),
+                      maxX: Math.max(...floorPolygon.map((p) => p.x)),
+                      minY: Math.min(...floorPolygon.map((p) => p.y)),
+                      maxY: Math.max(...floorPolygon.map((p) => p.y)),
+                  },
+                  PX_PER_IN
+              )
+            : null;
+
+    // Apply the Design sheet: floor finish to this floor level, wall finish
+    // to the selected wall or to every wall (one undo step for walls).
+    const applyDesign = ({ floorFinish: ff, wallFinish: wf, allWalls }) => {
+        if (ff) setFloors((fs) => fs.map((f, i) => (i === floorIndex ? { ...f, floorFinish: ff } : f)));
+        if (wf) {
+            snapshot();
+            setWalls((ws) =>
+                ws.map((w, i) => (allWalls || i === selectedWall ? { ...w, finish: { ...wf } } : w))
+            );
+        }
+    };
 
     const imgRect = canvas.w
         ? {
@@ -1634,17 +1666,51 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                         {/* Wood floor clipped to the room's outer boundary */}
                         {floorPolygon && (
                             <G clipPath="url(#room)">
-                                <Polygon points={floorPoints} fill="#C4A981" />
-                                {planks.map((p, i) => (
-                                    <Rect
-                                        key={i}
-                                        x={p.x}
-                                        y={p.y}
-                                        width={p.w}
-                                        height={p.h}
-                                        fill={p.color}
-                                    />
-                                ))}
+                                {floorPattern ? (
+                                    <>
+                                        <Polygon points={floorPoints} fill={floorPattern.base} />
+                                        {floorPattern.rects.map((p, i) => (
+                                            <Rect
+                                                key={i}
+                                                x={p.x}
+                                                y={p.y}
+                                                width={p.w}
+                                                height={p.h}
+                                                fill={p.color}
+                                                transform={
+                                                    p.rot
+                                                        ? `rotate(${p.rot} ${p.x + p.w / 2} ${p.y + p.h / 2})`
+                                                        : undefined
+                                                }
+                                            />
+                                        ))}
+                                        {floorPattern.lines.map((l, i) => (
+                                            <Line
+                                                key={`fl${i}`}
+                                                x1={l.x1}
+                                                y1={l.y1}
+                                                x2={l.x2}
+                                                y2={l.y2}
+                                                stroke={floorPattern.lineColor}
+                                                strokeWidth={1}
+                                            />
+                                        ))}
+                                    </>
+                                ) : (
+                                    <>
+                                        <Polygon points={floorPoints} fill="#C4A981" />
+                                        {planks.map((p, i) => (
+                                            <Rect
+                                                key={i}
+                                                x={p.x}
+                                                y={p.y}
+                                                width={p.w}
+                                                height={p.h}
+                                                fill={p.color}
+                                            />
+                                        ))}
+                                    </>
+                                )}
                             </G>
                         )}
 
@@ -2073,6 +2139,23 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                 setSizeSheetVisible(true);
                             }}
                         />
+                        <View>
+                            <ContextItem
+                                icon="brush-outline"
+                                label="Style"
+                                onPress={() => {
+                                    setAddMenuVisible(false);
+                                    setDesignSheet("walls");
+                                }}
+                            />
+                            {/* the wall's current color */}
+                            <View
+                                style={[
+                                    styles.wallColorDot,
+                                    { backgroundColor: wallFinishOf(selected).color },
+                                ]}
+                            />
+                        </View>
                         <ContextItem
                             icon="trash-outline"
                             label="Delete"
@@ -2209,6 +2292,19 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 </AnimatedPressable>
 
                 <AnimatedPressable
+                    onPress={() => {
+                        setMoreMenuVisible(false);
+                        setShareMenuVisible(false);
+                        setDesignSheet(selected ? "walls" : "floor");
+                    }}
+                    scaleTo={0.9}
+                    style={styles.tool}
+                >
+                    <Ionicons name="brush-outline" size={25} color={colors.text} />
+                    <Text style={styles.toolLabel}>Style</Text>
+                </AnimatedPressable>
+
+                <AnimatedPressable
                     onPress={() =>
                         navigation.navigate("DrawWalls", {
                             updatedWalls: walls,
@@ -2267,6 +2363,22 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 visible={furnitureSheetVisible}
                 onPick={addFurniture}
                 onClose={() => setFurnitureSheetVisible(false)}
+            />
+
+            <DesignSheet
+                visible={designSheet !== null}
+                initialTab={designSheet || "floor"}
+                floorName={floors[floorIndex]?.name}
+                floorFinishKey={floorFinishKey}
+                wallFinish={wallFinishOf(selected ?? walls[0])}
+                hasSelectedWall={selected !== null}
+                pro={pro}
+                onApply={applyDesign}
+                onProBlocked={() => {
+                    setDesignSheet(null);
+                    navigation.navigate("Paywall");
+                }}
+                onClose={() => setDesignSheet(null)}
             />
 
             <StairEditSheet
@@ -2489,13 +2601,23 @@ const styles = StyleSheet.create({
         flexDirection: "row",
         alignItems: "flex-end",
         justifyContent: "space-between",
-        paddingHorizontal: 24,
+        paddingHorizontal: 14,
         paddingBottom: 30,
         paddingTop: 8,
     },
     tool: {
         alignItems: "center",
-        minWidth: 64,
+        minWidth: 58,
+    },
+    wallColorDot: {
+        position: "absolute",
+        top: -2,
+        right: 2,
+        width: 11,
+        height: 11,
+        borderRadius: 6,
+        borderWidth: 1.5,
+        borderColor: colors.surface,
     },
     threeD: {
         fontSize: 24,
