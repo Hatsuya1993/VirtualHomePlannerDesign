@@ -1793,15 +1793,29 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                                 );
                                             })}
                                         </G>
+                                        {/* Size label: a white halo copy drawn first, then
+                                            the black text on top (react-native-svg ignores
+                                            paintOrder on iOS, so a single stroked text would
+                                            paint the halo over the letters). */}
+                                        <SvgText
+                                            x={selectedPiece.x}
+                                            y={selectedPiece.y + labelBelow}
+                                            fontSize={12 / s}
+                                            fontWeight="700"
+                                            fill={colors.surface}
+                                            stroke={colors.surface}
+                                            strokeWidth={3 / s}
+                                            strokeLinejoin="round"
+                                            textAnchor="middle"
+                                        >
+                                            {label}
+                                        </SvgText>
                                         <SvgText
                                             x={selectedPiece.x}
                                             y={selectedPiece.y + labelBelow}
                                             fontSize={12 / s}
                                             fontWeight="700"
                                             fill="#000000"
-                                            stroke={colors.surface}
-                                            strokeWidth={3 / s}
-                                            paintOrder="stroke"
                                             textAnchor="middle"
                                         >
                                             {label}
