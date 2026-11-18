@@ -31,7 +31,7 @@ const DesignCard = ({ design, onOpen, onLongPress }) => (
     >
         <View style={styles.thumb}>
             {design.walls?.length ? (
-                <PlanMiniature walls={design.walls} />
+                <PlanMiniature walls={design.walls} furniture={design.furniture} />
             ) : (
                 <Ionicons name="image-outline" size={32} color={colors.textFaint} />
             )}
@@ -68,6 +68,7 @@ export const DesignsScreen = ({ navigation }) => {
     const openDesign = (design) => {
         navigation.navigate("PlanPreview", {
             walls: design.walls,
+            furniture: design.furniture ?? [],
             designId: design.id,
             designName: design.name,
         });

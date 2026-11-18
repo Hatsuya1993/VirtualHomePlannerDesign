@@ -17,12 +17,13 @@ import { report } from "./report";
 const designsCol = (uid) => collection(db, "users", uid, "designs");
 
 // Firestore rejects `undefined` values; a JSON round-trip drops undefined keys
-// while preserving the nested walls/openings structure.
-const clean = (walls) => JSON.parse(JSON.stringify(walls ?? []));
+// while preserving the nested walls/openings (and furniture) structure.
+const clean = (list) => JSON.parse(JSON.stringify(list ?? []));
 
-export const saveDesign = async (uid, { walls, name }) => {
+export const saveDesign = async (uid, { walls, furniture, name }) => {
     const ref = await addDoc(designsCol(uid), {
         walls: clean(walls),
+        furniture: clean(furniture),
         name: name || "Untitled plan",
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -30,11 +31,12 @@ export const saveDesign = async (uid, { walls, name }) => {
     return ref.id;
 };
 
-export const updateDesign = (uid, id, { walls, name }) =>
+export const updateDesign = (uid, id, { walls, furniture, name }) =>
     setDoc(
         doc(db, "users", uid, "designs", id),
         {
             walls: clean(walls),
+            furniture: clean(furniture),
             ...(name ? { name } : {}),
             updatedAt: serverTimestamp(),
         },

@@ -15,6 +15,7 @@ import * as THREE from "three";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { chainRoom, roomOutline } from "../../utils/roomGeometry";
+import { buildFurniture, insideCollider } from "../../utils/furniture3D";
 import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
@@ -24,6 +25,7 @@ const DEFAULT_THICKNESS_IN = 8;
 const EYE_HEIGHT_FT = 5.5;
 const WALK_SPEED = 5; // feet per second at full joystick deflection
 const WALL_COLLIDE_MARGIN = 0.28; // how close the camera may get to a solid wall segment
+const FURNITURE_COLLIDE_MARGIN = 0.35; // and to the edge of a piece of furniture
 const LOOK_SENSITIVITY = 0.006; // radians per screen-pixel of drag
 const MAX_PITCH = Math.PI / 2 - 0.05;
 const JOYSTICK_RADIUS = 40;
@@ -182,9 +184,9 @@ const distanceToWallSegment = (x, z, s) => {
     return Math.hypot(x - (s.ax + t * dx), z - (s.az + t * dz));
 };
 
-// Builds the Three.js scene (floor, ceiling, extruded walls, a pendant
-// light) from the 2D wall list, in feet, centered on the room.
-const buildScene = (walls, { maxAnisotropy = 1 } = {}) => {
+// Builds the Three.js scene (floor, ceiling, extruded walls, furniture, a
+// pendant light) from the 2D plan, in feet, centered on the room.
+const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
     const scene = new THREE.Scene();
     // Door pivots to animate open in the render loop: { pivot, base, target }.
     const doors = [];
@@ -500,6 +502,14 @@ const buildScene = (walls, { maxAnisotropy = 1 } = {}) => {
         if (cc < L / 2) pushSeg(cc, L / 2);
     });
 
+    // Furniture placed in the 2D plan, built from the shared catalog in the
+    // same content → feet mapping as the walls.
+    const { group: furnitureGroup, colliders: furnitureColliders } = buildFurniture(
+        furniture,
+        toFeet
+    );
+    scene.add(furnitureGroup);
+
     // Lighting: a hemisphere fill (warm floor bounce / cool ceiling), a warm
     // pendant point light, and a soft directional for surface definition.
     scene.add(new THREE.HemisphereLight("#FFFFFF", "#8A7A66", 0.55));
@@ -531,13 +541,21 @@ const buildScene = (walls, { maxAnisotropy = 1 } = {}) => {
     shade.position.set(roomCenter.x, ceilingHeight - 2.1, roomCenter.z);
     scene.add(shade);
 
-    return { scene, ceilingHeight, roomCenter, doors, collisionSegments };
+    return {
+        scene,
+        ceilingHeight,
+        roomCenter,
+        doors,
+        collisionSegments,
+        furnitureColliders,
+    };
 };
 
 // First-person 3D walkthrough of the traced room: drag anywhere to look
 // around, drag the on-screen stick to walk in that direction.
 export const Room3DScreen = ({ navigation, route }) => {
     const walls = route.params?.walls ?? [];
+    const furniture = route.params?.furniture ?? [];
 
     // Explicit, synchronously-available numeric dimensions for the GL
     // surface. gl.drawingBufferWidth/Height (and even RN's own onLayout on
@@ -628,11 +646,26 @@ export const Room3DScreen = ({ navigation, route }) => {
 
             const maxAnisotropy =
                 renderer.capabilities?.getMaxAnisotropy?.() ?? 1;
-            const { scene, ceilingHeight, roomCenter, doors, collisionSegments } =
-                buildScene(walls, { maxAnisotropy });
+            const {
+                scene,
+                ceilingHeight,
+                roomCenter,
+                doors,
+                collisionSegments,
+                furnitureColliders,
+            } = buildScene(walls, { maxAnisotropy, furniture });
+            // Furniture you'd bump into blocks walking too — except any piece
+            // the camera starts inside (e.g. a table at the room's center),
+            // which would otherwise trap you.
+            const furnitureSegments = furnitureColliders
+                .filter((c) => !insideCollider(c, roomCenter.x, roomCenter.z))
+                .flatMap((c) => c.segs);
             const blocked = (x, z) =>
                 collisionSegments.some(
                     (s) => distanceToWallSegment(x, z, s) < WALL_COLLIDE_MARGIN
+                ) ||
+                furnitureSegments.some(
+                    (s) => distanceToWallSegment(x, z, s) < FURNITURE_COLLIDE_MARGIN
                 );
             console.log(
                 "Room3D: scene built, children:",

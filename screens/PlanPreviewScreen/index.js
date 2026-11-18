@@ -24,6 +24,7 @@ import Svg, {
     Path,
     Polygon,
     Rect,
+    Text as SvgText,
 } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
@@ -31,6 +32,21 @@ import { PromptModal } from "../../components/PromptModal";
 import { GapWarningBanner } from "../../components/GapWarningBanner";
 import { StatsSheet } from "../../components/StatsSheet";
 import { WallSizeSheet } from "../../components/WallSizeSheet";
+import { FurnitureGlyph } from "../../components/FurnitureGlyph";
+import { FurnitureSheet } from "../../components/FurnitureSheet";
+import { FurnitureEditSheet } from "../../components/FurnitureEditSheet";
+import {
+    cloneFurniture,
+    createFurniture,
+    footprintPx,
+    furnitureLayer,
+    hitTestFurniture,
+    normDeg,
+    pointInFurniture,
+    sortForDrawing,
+    toContent as furnitureToContent,
+} from "../../utils/furnitureCatalog";
+import { formatLength } from "../../utils/units";
 import { usePinchPanZoom } from "../../hooks/usePinchPanZoom";
 import { useUnits } from "../../context/UnitsContext";
 import {
@@ -67,6 +83,11 @@ const TAP_MOVE_THRESHOLD = 8; // screen-space movement below which a handle pres
 const MIN_OPENING_WIDTH = 18; // content-space minimum width when resizing a window/door
 const OPENING_END_MARGIN = 6; // screen-space keep-away from the wall's own ends when resizing
 const OPENING_MENU_WIDTH = 336;
+const FURNITURE_MENU_WIDTH = 320;
+const ROTATE_HANDLE_GAP = 26; // screen-space distance of the rotate knob behind a selected piece
+const ROTATE_SNAP_DEG = 15; // rotation snaps to multiples of this when within ROTATE_SNAP_TOL
+const ROTATE_SNAP_TOL = 5;
+const FURNITURE_COLOR = "#7C5CFA"; // selection outline for furniture
 
 const OPENING_DEFAULTS = {
     window: { width: 46 },
@@ -100,6 +121,13 @@ const DOOR_ACTIONS = [
     { key: "copy", icon: "copy-outline", label: "Copy" },
     { key: "rotate", icon: "reload-outline", label: "Rotate" },
     { key: "flip", icon: "swap-horizontal-outline", label: "Flip" },
+    { key: "delete", icon: "trash-outline", label: "Delete" },
+];
+
+const FURNITURE_ACTIONS = [
+    { key: "rotate", icon: "reload-outline", label: "Rotate" },
+    { key: "edit", icon: "options-outline", label: "Edit" },
+    { key: "copy", icon: "copy-outline", label: "Copy" },
     { key: "delete", icon: "trash-outline", label: "Delete" },
 ];
 
@@ -213,16 +241,25 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     const [moreMenuVisible, setMoreMenuVisible] = useState(false);
     const [shareMenuVisible, setShareMenuVisible] = useState(false);
     const [statsVisible, setStatsVisible] = useState(false);
+    // Placed furniture: { id, type, x, y, rot, w, d, h, elev, color } — see
+    // utils/furnitureCatalog.js. Positions share the walls' content space.
+    const [furniture, setFurniture] = useState(route.params?.furniture ?? []);
+    const [selectedFurniture, setSelectedFurniture] = useState(null); // piece id | null
+    const [furnitureSheetVisible, setFurnitureSheetVisible] = useState(false);
+    const [furnitureEditVisible, setFurnitureEditVisible] = useState(false);
     const { units } = useUnits();
     const svgRef = useRef(null);
 
-    // Undo/redo history for wall edits. `wallsRef` always holds the latest
-    // committed walls so snapshots taken inside event handlers are current.
+    // Undo/redo history for wall + furniture edits. `wallsRef`/`furnitureRef`
+    // always hold the latest committed state so snapshots taken inside event
+    // handlers are current. History entries are { walls, furniture }.
     const wallsRef = useRef(walls);
     wallsRef.current = walls;
+    const furnitureRef = useRef(furniture);
+    furnitureRef.current = furniture;
     const undoStack = useRef([]);
     const redoStack = useRef([]);
-    const pendingSnapRef = useRef(null); // pre-drag walls, committed only if the drag actually edits
+    const pendingSnapRef = useRef(null); // pre-drag state, committed only if the drag actually edits
     const [, forceHist] = useState(0);
     const bumpHist = () => forceHist((n) => n + 1);
 
@@ -235,8 +272,19 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         bumpHist();
     };
 
-    // Snapshot the current walls before a discrete (non-drag) mutation.
-    const snapshot = () => pushUndo(wallsRef.current);
+    const currentState = () => ({
+        walls: wallsRef.current,
+        furniture: furnitureRef.current,
+    });
+    const restoreState = (st) => {
+        wallsRef.current = st.walls;
+        furnitureRef.current = st.furniture;
+        setWalls(st.walls);
+        setFurniture(st.furniture);
+    };
+
+    // Snapshot the current state before a discrete (non-drag) mutation.
+    const snapshot = () => pushUndo(currentState());
 
     const clearSelectionState = () => {
         setSelectedWall(null);
@@ -245,24 +293,22 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         setAddMenuVisible(false);
         setSplitMode(false);
         setAddOpeningKind(null);
+        setSelectedFurniture(null);
+        setFurnitureEditVisible(false);
     };
 
     const undo = () => {
         if (undoStack.current.length === 0) return;
-        redoStack.current.push(wallsRef.current);
-        const prev = undoStack.current.pop();
-        wallsRef.current = prev;
-        setWalls(prev);
+        redoStack.current.push(currentState());
+        restoreState(undoStack.current.pop());
         clearSelectionState();
         bumpHist();
     };
 
     const redo = () => {
         if (redoStack.current.length === 0) return;
-        undoStack.current.push(wallsRef.current);
-        const next = redoStack.current.pop();
-        wallsRef.current = next;
-        setWalls(next);
+        undoStack.current.push(currentState());
+        restoreState(redoStack.current.pop());
         clearSelectionState();
         bumpHist();
     };
@@ -321,7 +367,13 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             if (key === "copy") {
                 const file = new File(Paths.document, `floorplan-copy-${Date.now()}.json`);
                 file.create();
-                file.write(JSON.stringify({ walls, savedAt: new Date().toISOString() }, null, 2));
+                file.write(
+                    JSON.stringify(
+                        { walls, furniture, savedAt: new Date().toISOString() },
+                        null,
+                        2
+                    )
+                );
                 Alert.alert("Saved a Copy", "A copy of this plan was saved to your device.");
                 return;
             }
@@ -410,10 +462,26 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             return;
         }
         const hit = hitTestWall(walls, contentPoint, HIT_RADIUS / transform.s);
+        // A tap that misses every wall may land on a rug (rugs aren't grabbed
+        // by hitTestHandle until selected).
+        const rug =
+            hit === null ? hitTestFurniture(furniture, contentPoint, 2 / transform.s) : null;
         setSelectedWall(hit);
         setSelectedOpening(null);
+        setSelectedFurniture(rug ? rug.id : null);
         setAddMenuVisible(false);
         setMoreMenuVisible(false);
+    };
+
+    const selectedPiece = selectedFurniture
+        ? furniture.find((f) => f.id === selectedFurniture) ?? null
+        : null;
+
+    // Content-space position of a piece's rotate knob: a constant screen
+    // distance behind its back edge, so it stays grabbable at any zoom.
+    const rotateKnobPos = (f) => {
+        const { d } = footprintPx(f);
+        return furnitureToContent(f, { x: 0, y: -d / 2 - ROTATE_HANDLE_GAP / transform.s });
     };
 
     // Any window/door is directly grabbable/tappable regardless of whether
@@ -443,6 +511,25 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             return null;
         }
 
+        // The selected piece's rotate knob, then the piece itself (so a piece
+        // sitting on a rug stays grabbable once selected).
+        if (selectedPiece) {
+            const knob = rotateKnobPos(selectedPiece);
+            if (Math.hypot(contentPoint.x - knob.x, contentPoint.y - knob.y) <= r) {
+                return { kind: "furnitureRotate", id: selectedPiece.id };
+            }
+            if (pointInFurniture(selectedPiece, contentPoint, 2 / transform.s)) {
+                return {
+                    kind: "furniture",
+                    id: selectedPiece.id,
+                    offset: {
+                        x: selectedPiece.x - contentPoint.x,
+                        y: selectedPiece.y - contentPoint.y,
+                    },
+                };
+            }
+        }
+
         for (let wi = 0; wi < walls.length; wi++) {
             const w = walls[wi];
             if (!w.openings) continue;
@@ -456,22 +543,70 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             }
         }
 
-        if (selectedWall === null) return null;
-        const w = walls[selectedWall];
-        if (!w) return null;
-
-        let anchor = null;
-        if (Math.hypot(contentPoint.x - w.x1, contentPoint.y - w.y1) <= r) {
-            anchor = { x: w.x1, y: w.y1 };
-        } else if (Math.hypot(contentPoint.x - w.x2, contentPoint.y - w.y2) <= r) {
-            anchor = { x: w.x2, y: w.y2 };
+        const w = selectedWall !== null ? walls[selectedWall] : null;
+        if (w) {
+            let anchor = null;
+            if (Math.hypot(contentPoint.x - w.x1, contentPoint.y - w.y1) <= r) {
+                anchor = { x: w.x1, y: w.y1 };
+            } else if (Math.hypot(contentPoint.x - w.x2, contentPoint.y - w.y2) <= r) {
+                anchor = { x: w.x2, y: w.y2 };
+            }
+            if (anchor) return findCornerGroup(walls, anchor);
         }
-        if (!anchor) return null;
-        return findCornerGroup(walls, anchor);
+
+        // Any piece of furniture: press-and-drag moves it, a tap selects it.
+        // Rugs are skipped until selected so a big rug doesn't swallow
+        // one-finger panning (tapping one still selects it, via onTap).
+        const piece = hitTestFurniture(
+            furniture.filter((f) => furnitureLayer(f) > 0),
+            contentPoint,
+            2 / transform.s
+        );
+        if (piece) {
+            return {
+                kind: "furniture",
+                id: piece.id,
+                offset: { x: piece.x - contentPoint.x, y: piece.y - contentPoint.y },
+            };
+        }
+        return null;
     };
 
     const handleDragMove = (target, contentPoint) => {
         if (!target) return;
+
+        if (target.kind === "furniture") {
+            setFurniture((fs) =>
+                fs.map((f) =>
+                    f.id === target.id
+                        ? {
+                              ...f,
+                              x: contentPoint.x + target.offset.x,
+                              y: contentPoint.y + target.offset.y,
+                          }
+                        : f
+                )
+            );
+            return;
+        }
+
+        if (target.kind === "furnitureRotate") {
+            setFurniture((fs) =>
+                fs.map((f) => {
+                    if (f.id !== target.id) return f;
+                    // The knob sits on the piece's local -y axis, i.e. at
+                    // (rot - 90°) on screen — so the drag angle + 90° is rot.
+                    let deg =
+                        (Math.atan2(contentPoint.y - f.y, contentPoint.x - f.x) * 180) /
+                            Math.PI +
+                        90;
+                    const snapped = Math.round(deg / ROTATE_SNAP_DEG) * ROTATE_SNAP_DEG;
+                    deg = Math.abs(deg - snapped) <= ROTATE_SNAP_TOL ? snapped : Math.round(deg);
+                    return { ...f, rot: normDeg(deg) };
+                })
+            );
+            return;
+        }
 
         if (target.kind === "openingEnd") {
             setWalls((ws) =>
@@ -561,23 +696,34 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     // it — select it (opening its own context menu) rather than treating the
     // negligible movement as a drag. Also selects its parent wall so it
     // highlights, even if the wall wasn't already selected.
-    // Remember the pre-drag walls so a genuine drag can be recorded as one undo
+    // Remember the pre-drag state so a genuine drag can be recorded as one undo
     // step (and a tap that merely nudged a handle can be rolled back).
     const handleDragStart = () => {
-        pendingSnapRef.current = wallsRef.current;
+        pendingSnapRef.current = currentState();
     };
 
     const handleDragEnd = (target, _contentPoint, gs) => {
         const pre = pendingSnapRef.current;
         pendingSnapRef.current = null;
-        const changed = pre !== null && wallsRef.current !== pre;
+        const changed =
+            pre !== null &&
+            (wallsRef.current !== pre.walls || furnitureRef.current !== pre.furniture);
         const isTap = gs && Math.hypot(gs.dx, gs.dy) < TAP_MOVE_THRESHOLD;
 
         if (changed && !isTap) {
             pushUndo(pre); // genuine drag → one undo point at the pre-drag state
         } else if (changed && isTap) {
-            wallsRef.current = pre; // barely-moved handle press → undo the nudge
-            setWalls(pre);
+            restoreState(pre); // barely-moved handle press → undo the nudge
+        }
+
+        // Touching a piece (tap or drag) selects it and shows its menu.
+        if (target?.kind === "furniture") {
+            setSelectedFurniture(target.id);
+            setSelectedWall(null);
+            setSelectedOpening(null);
+            setResizingOpening(null);
+            setAddMenuVisible(false);
+            return;
         }
 
         if (
@@ -590,6 +736,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 wallIndex: target.wallIndex,
                 openingIndex: target.openingIndex,
             });
+            setSelectedFurniture(null);
             setAddMenuVisible(false);
         }
     };
@@ -812,6 +959,96 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         );
     };
 
+    // --- Furniture -------------------------------------------------------
+
+    // Drop a new piece at the center of what's currently on screen and select it.
+    const addFurniture = (type) => {
+        setFurnitureSheetVisible(false);
+        const cx = canvas.w ? (canvas.w / 2 - transform.tx) / transform.s : 0;
+        const cy = canvas.h ? (canvas.h / 2 - transform.ty) / transform.s : 0;
+        const piece = createFurniture(type, cx, cy);
+        snapshot();
+        setFurniture((fs) => [...fs, piece]);
+        setSelectedWall(null);
+        setSelectedOpening(null);
+        setResizingOpening(null);
+        setAddMenuVisible(false);
+        setSelectedFurniture(piece.id);
+    };
+
+    const updateSelectedFurniture = (patch) => {
+        if (!selectedFurniture) return;
+        snapshot();
+        setFurniture((fs) =>
+            fs.map((f) => (f.id === selectedFurniture ? { ...f, ...patch } : f))
+        );
+    };
+
+    const rotateSelectedFurniture = () => {
+        if (!selectedPiece) return;
+        // Step to the next quarter turn (so an odd angle squares back up).
+        const next = (Math.floor(normDeg(selectedPiece.rot || 0) / 90) + 1) * 90;
+        updateSelectedFurniture({ rot: normDeg(next) });
+    };
+
+    const copySelectedFurniture = () => {
+        if (!selectedPiece) return;
+        const copy = cloneFurniture(selectedPiece);
+        snapshot();
+        setFurniture((fs) => [...fs, copy]);
+        setSelectedFurniture(copy.id);
+    };
+
+    const deleteSelectedFurniture = () => {
+        if (!selectedFurniture) return;
+        snapshot();
+        setFurniture((fs) => fs.filter((f) => f.id !== selectedFurniture));
+        setSelectedFurniture(null);
+        setFurnitureEditVisible(false);
+    };
+
+    const handleFurnitureAction = (key) => {
+        if (key === "rotate") rotateSelectedFurniture();
+        else if (key === "edit") setFurnitureEditVisible(true);
+        else if (key === "copy") copySelectedFurniture();
+        else if (key === "delete") deleteSelectedFurniture();
+    };
+
+    const furnitureMenuPos =
+        selectedPiece && canvas.w
+            ? (() => {
+                  // Anchor above the piece's topmost on-screen point.
+                  const { w, d } = footprintPx(selectedPiece);
+                  const corners = [
+                      { x: -w / 2, y: -d / 2 },
+                      { x: w / 2, y: -d / 2 },
+                      { x: w / 2, y: d / 2 },
+                      { x: -w / 2, y: d / 2 },
+                  ].map((p) => furnitureToContent(selectedPiece, p));
+                  const minY = Math.min(...corners.map((p) => p.y));
+                  const maxY = Math.max(...corners.map((p) => p.y));
+                  const screenX = transform.tx + selectedPiece.x * transform.s;
+                  const topY = transform.ty + minY * transform.s;
+                  const botY = transform.ty + maxY * transform.s;
+
+                  // Leave room above for the rotate knob; flip below if needed.
+                  const GAP = 16 + ROTATE_HANDLE_GAP;
+                  let top = topY - MENU_HEIGHT - GAP;
+                  if (top < 12) top = botY + 28;
+
+                  return {
+                      left: Math.max(
+                          12,
+                          Math.min(
+                              screenX - FURNITURE_MENU_WIDTH / 2,
+                              canvas.w - FURNITURE_MENU_WIDTH - 12
+                          )
+                      ),
+                      top: Math.max(12, Math.min(top, canvas.h - MENU_HEIGHT - 12)),
+                  };
+              })()
+            : null;
+
     const deleteSelectedWall = () => {
         if (selectedWall === null) return;
         snapshot();
@@ -857,9 +1094,9 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         setSaving(true);
         try {
             if (savedId) {
-                await updateDesign(user.uid, savedId, { walls, name });
+                await updateDesign(user.uid, savedId, { walls, furniture, name });
             } else {
-                const id = await saveDesign(user.uid, { walls, name });
+                const id = await saveDesign(user.uid, { walls, furniture, name });
                 setSavedId(id);
             }
             Alert.alert("Saved", "Your design is in My Designs.");
@@ -1169,6 +1406,18 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                             </G>
                         )}
 
+                        {/* Furniture (under the walls, so pieces pushed
+                            against a wall tuck neatly beneath its line) */}
+                        {sortForDrawing(furniture).map((f) => (
+                            <G
+                                key={f.id}
+                                transform={`translate(${f.x} ${f.y}) rotate(${f.rot || 0})`}
+                                opacity={(f.elev ?? 0) > 0 ? 0.88 : 1}
+                            >
+                                <FurnitureGlyph item={f} sw={0.9} />
+                            </G>
+                        ))}
+
                         {/* Walls */}
                         {walls.map((w, i) => (
                             <Line
@@ -1344,6 +1593,78 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                 );
                             })()}
 
+                        {/* Selected furniture: outline, rotate knob, size label */}
+                        {selectedPiece &&
+                            (() => {
+                                const { w, d } = footprintPx(selectedPiece);
+                                const s = transform.s;
+                                const knobY = -d / 2 - ROTATE_HANDLE_GAP / s;
+                                const label = `${formatLength(selectedPiece.w, units)} × ${formatLength(
+                                    selectedPiece.d,
+                                    units
+                                )}`;
+                                // Below the piece whatever its rotation.
+                                const labelBelow = Math.hypot(w, d) / 2 + 16 / s;
+                                return (
+                                    <>
+                                        <G
+                                            transform={`translate(${selectedPiece.x} ${selectedPiece.y}) rotate(${
+                                                selectedPiece.rot || 0
+                                            })`}
+                                        >
+                                            <Rect
+                                                x={-w / 2 - 3 / s}
+                                                y={-d / 2 - 3 / s}
+                                                width={w + 6 / s}
+                                                height={d + 6 / s}
+                                                rx={3 / s}
+                                                fill={FURNITURE_COLOR}
+                                                fillOpacity={0.08}
+                                                stroke={FURNITURE_COLOR}
+                                                strokeWidth={2 / s}
+                                                strokeDasharray={`${6 / s} ${4 / s}`}
+                                            />
+                                            <Line
+                                                x1={0}
+                                                y1={-d / 2 - 3 / s}
+                                                x2={0}
+                                                y2={knobY}
+                                                stroke={FURNITURE_COLOR}
+                                                strokeWidth={1.5 / s}
+                                            />
+                                            <Circle
+                                                cx={0}
+                                                cy={knobY}
+                                                r={10 / s}
+                                                fill={colors.surface}
+                                                stroke={FURNITURE_COLOR}
+                                                strokeWidth={2.5 / s}
+                                            />
+                                            <Path
+                                                d={`M${-4.5 / s},${knobY - 1 / s} A${4.5 / s},${4.5 / s} 0 1 1 ${0},${knobY + 4.5 / s}`}
+                                                fill="none"
+                                                stroke={FURNITURE_COLOR}
+                                                strokeWidth={1.6 / s}
+                                                strokeLinecap="round"
+                                            />
+                                        </G>
+                                        <SvgText
+                                            x={selectedPiece.x}
+                                            y={selectedPiece.y + labelBelow}
+                                            fontSize={12 / s}
+                                            fontWeight="700"
+                                            fill={FURNITURE_COLOR}
+                                            stroke={colors.surface}
+                                            strokeWidth={3 / s}
+                                            paintOrder="stroke"
+                                            textAnchor="middle"
+                                        >
+                                            {label}
+                                        </SvgText>
+                                    </>
+                                );
+                            })()}
+
                         {/* Gap highlights: mark the loose wall ends causing the
                             open room, drawn last so they sit above everything. */}
                         {gapEnds.map((p, i) => (
@@ -1457,6 +1778,22 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                         ))}
                     </View>
                 )}
+
+                {/* Selected-furniture context menu */}
+                {furnitureMenuPos && (
+                    <View
+                        style={[styles.contextMenu, styles.furnitureMenu, furnitureMenuPos]}
+                    >
+                        {FURNITURE_ACTIONS.map((action) => (
+                            <ContextItem
+                                key={action.key}
+                                icon={action.icon}
+                                label={action.label}
+                                onPress={() => handleFurnitureAction(action.key)}
+                            />
+                        ))}
+                    </View>
+                )}
             </View>
 
             {/* Toolbar */}
@@ -1465,7 +1802,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                     onPress={() =>
                         hasGap
                             ? setWarningVisible(true)
-                            : navigation.navigate("Room3D", { walls })
+                            : navigation.navigate("Room3D", { walls, furniture })
                     }
                     scaleTo={0.9}
                     style={styles.tool}
@@ -1489,9 +1826,25 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 </AnimatedPressable>
 
                 <AnimatedPressable
+                    onPress={() => {
+                        setMoreMenuVisible(false);
+                        setShareMenuVisible(false);
+                        setFurnitureSheetVisible(true);
+                    }}
+                    scaleTo={0.9}
+                    style={styles.tool}
+                >
+                    <MaterialCommunityIcons name="sofa-outline" size={27} color={colors.text} />
+                    <Text style={styles.toolLabel}>Furniture</Text>
+                </AnimatedPressable>
+
+                <AnimatedPressable
                     onPress={() =>
                         navigation.navigate("DrawWalls", {
                             updatedWalls: walls,
+                            // Carried through wall drawing and handed back on
+                            // "Done" so placed furniture isn't lost.
+                            furniture,
                             imageUri,
                         })
                     }
@@ -1509,6 +1862,19 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 pixelsPerFoot={PIXELS_PER_FOOT}
                 onClose={() => setSizeSheetVisible(false)}
                 onApply={applyWallSize}
+            />
+
+            <FurnitureSheet
+                visible={furnitureSheetVisible}
+                onPick={addFurniture}
+                onClose={() => setFurnitureSheetVisible(false)}
+            />
+
+            <FurnitureEditSheet
+                visible={furnitureEditVisible && !!selectedPiece}
+                item={selectedPiece}
+                onApply={updateSelectedFurniture}
+                onClose={() => setFurnitureEditVisible(false)}
             />
 
             <StatsSheet
@@ -1605,6 +1971,9 @@ const styles = StyleSheet.create({
     },
     openingMenu: {
         width: OPENING_MENU_WIDTH,
+    },
+    furnitureMenu: {
+        width: FURNITURE_MENU_WIDTH,
     },
     contextLabel: {
         fontSize: 12,

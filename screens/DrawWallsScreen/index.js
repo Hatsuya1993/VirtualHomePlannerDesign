@@ -47,10 +47,15 @@ export const DrawWallsScreen = ({ navigation, route }) => {
     const [canvas, setCanvas] = useState({ w: 0, h: 0 });
     const [warningVisible, setWarningVisible] = useState(false);
 
+    // Furniture placed in Plan Preview isn't edited here, just carried back
+    // to Plan Preview on "Done" so it survives a round of wall drawing.
+    const furnitureRef = useRef(route.params?.furniture ?? []);
+
     // Pick up edits made after "Done" (e.g. a wall deleted in Plan Preview)
     // when navigation lands back here with fresh params.
     useEffect(() => {
         if (route.params?.updatedWalls) {
+            furnitureRef.current = route.params.furniture ?? furnitureRef.current;
             setWalls(route.params.updatedWalls);
             setUndoStack([]);
             setRedoStack([]);
@@ -316,7 +321,11 @@ export const DrawWallsScreen = ({ navigation, route }) => {
                         } else if (hasGap) {
                             setWarningVisible(true);
                         } else {
-                            navigation.navigate("PlanPreview", { walls, imageUri });
+                            navigation.navigate("PlanPreview", {
+                                walls,
+                                imageUri,
+                                furniture: furnitureRef.current,
+                            });
                         }
                     }}
                     scaleTo={0.94}
