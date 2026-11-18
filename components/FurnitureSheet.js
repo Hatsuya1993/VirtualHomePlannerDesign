@@ -227,9 +227,12 @@ const styles = StyleSheet.create({
     chipScroll: {
         flexGrow: 0,
         marginTop: 10,
+        borderBottomWidth: StyleSheet.hairlineWidth,
+        borderBottomColor: colors.border,
     },
     chipRow: {
         paddingHorizontal: 16,
+        paddingBottom: 14,
         gap: 8,
     },
     chip: {
