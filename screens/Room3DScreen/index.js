@@ -1105,21 +1105,23 @@ export const Room3DScreen = ({ navigation, route }) => {
                         <Text style={styles.toolLabel}>Plan</Text>
                     </AnimatedPressable>
 
-                    {mode === "walk" ? (
-                        <Joystick
-                            onChange={(v) => {
-                                rigRef.current?.setStick(v);
-                                dirtyRef.current = true;
-                            }}
-                        />
-                    ) : (
-                        <View style={styles.stickSpacer} />
-                    )}
-
                     <AnimatedPressable onPress={resetView} scaleTo={0.9} style={styles.toolPill}>
                         <Ionicons name="scan-outline" size={22} color="#FFFFFF" />
                         <Text style={styles.toolLabel}>Reset</Text>
                     </AnimatedPressable>
+
+                    {/* Walk stick pinned to the exact bottom-center, on its own
+                        layer so it stays centered whatever sits either side. */}
+                    {mode === "walk" && (
+                        <View style={styles.stickLayer} pointerEvents="box-none">
+                            <Joystick
+                                onChange={(v) => {
+                                    rigRef.current?.setStick(v);
+                                    dirtyRef.current = true;
+                                }}
+                            />
+                        </View>
+                    )}
                 </View>
             </SafeAreaView>
         </View>
@@ -1313,6 +1315,7 @@ const styles = StyleSheet.create({
         paddingHorizontal: 20,
         paddingBottom: 14,
         paddingTop: 4,
+        minHeight: 96 + 18, // room for the walk stick, so the bar doesn't jump between modes
     },
     toolPill: {
         width: 72,
@@ -1334,8 +1337,12 @@ const styles = StyleSheet.create({
         color: "#FFFFFF",
         marginTop: 2,
     },
-    stickSpacer: {
-        width: 96,
+    stickLayer: {
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: 14,
+        alignItems: "center",
     },
     stickBase: {
         width: 96,
