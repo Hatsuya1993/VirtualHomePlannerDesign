@@ -47,6 +47,7 @@ import {
     toContent as furnitureToContent,
 } from "../../utils/furnitureCatalog";
 import { formatLength } from "../../utils/units";
+import { clashMessage, computeClashes } from "../../utils/furnitureClash";
 import { usePinchPanZoom } from "../../hooks/usePinchPanZoom";
 import { useUnits } from "../../context/UnitsContext";
 import {
@@ -247,6 +248,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     const [selectedFurniture, setSelectedFurniture] = useState(null); // piece id | null
     const [furnitureSheetVisible, setFurnitureSheetVisible] = useState(false);
     const [furnitureEditVisible, setFurnitureEditVisible] = useState(false);
+    const [clashWarningVisible, setClashWarningVisible] = useState(false);
     const { units } = useUnits();
     const svgRef = useRef(null);
 
@@ -791,6 +793,10 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     // While warning about a gap, mark the loose wall ends so the user can see
     // exactly where the room is open. Updates live as they drag ends together.
     const gapEnds = warningVisible && hasGap ? openEndpoints(walls) : [];
+    // Furniture clashing with other furniture, walls or doors — outlined in
+    // red live, and (like a gap) blocks switching to 3D until resolved.
+    const clashes = computeClashes(walls, furniture);
+    const hasClash = clashes.ids.size > 0;
 
     const selected = selectedWall !== null ? walls[selectedWall] : null;
     const menuPos =
@@ -1328,6 +1334,20 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 message="You need to complete your room to switch to 3D. The open ends are marked in red — drag them onto the neighbouring wall to close the gap."
             />
 
+            {/* Furniture clash warning (shown when 3D is blocked by a clash) */}
+            <GapWarningBanner
+                visible={
+                    clashWarningVisible &&
+                    hasClash &&
+                    !(warningVisible && hasGap) &&
+                    !splitMode &&
+                    !addOpeningKind &&
+                    !resizingOpening
+                }
+                onDismiss={() => setClashWarningVisible(false)}
+                message={hasClash ? clashMessage(clashes) : ""}
+            />
+
             {/* Split-mode instructions */}
             <GapWarningBanner
                 visible={splitMode}
@@ -1593,6 +1613,32 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                 );
                             })()}
 
+                        {/* Clashing furniture: red outline */}
+                        {furniture
+                            .filter((f) => clashes.ids.has(f.id))
+                            .map((f) => {
+                                const { w, d } = footprintPx(f);
+                                const s = transform.s;
+                                return (
+                                    <G
+                                        key={`clash${f.id}`}
+                                        transform={`translate(${f.x} ${f.y}) rotate(${f.rot || 0})`}
+                                    >
+                                        <Rect
+                                            x={-w / 2 - 1.5 / s}
+                                            y={-d / 2 - 1.5 / s}
+                                            width={w + 3 / s}
+                                            height={d + 3 / s}
+                                            rx={2 / s}
+                                            fill={GAP_HIGHLIGHT}
+                                            fillOpacity={0.18}
+                                            stroke={GAP_HIGHLIGHT}
+                                            strokeWidth={2.5 / s}
+                                        />
+                                    </G>
+                                );
+                            })}
+
                         {/* Selected furniture: outline, rotate knob, size label */}
                         {selectedPiece &&
                             (() => {
@@ -1802,6 +1848,8 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                     onPress={() =>
                         hasGap
                             ? setWarningVisible(true)
+                            : hasClash
+                            ? setClashWarningVisible(true)
                             : navigation.navigate("Room3D", { walls, furniture })
                     }
                     scaleTo={0.9}
