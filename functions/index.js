@@ -13,6 +13,7 @@ import { initializeApp } from "firebase-admin/app";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { defineSecret } from "firebase-functions/params";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
+import { logger } from "firebase-functions/v2";
 
 initializeApp();
 const db = getFirestore();
@@ -104,6 +105,7 @@ export const recognizeFloorPlan = onCall(
 
         const { commit } = await authorize(request, REVENUECAT_SECRET_KEY.value());
 
+        const started = Date.now();
         const res = await fetch(ANTHROPIC_URL, {
             method: "POST",
             headers: {
@@ -135,6 +137,11 @@ export const recognizeFloorPlan = onCall(
 
         if (!res.ok) {
             const detail = await res.text().catch(() => "");
+            logger.warn("recognizeFloorPlan: Anthropic error", {
+                status: res.status,
+                ms: Date.now() - started,
+                detail: detail.slice(0, 300),
+            });
             throw new HttpsError(
                 "internal",
                 `AI request failed (${res.status}). ${detail.slice(0, 180)}`
@@ -143,6 +150,15 @@ export const recognizeFloorPlan = onCall(
 
         const json = await res.json();
         const text = (json.content || []).map((c) => c.text || "").join("");
+        // Diagnostics only — no image or response content is logged.
+        logger.info("recognizeFloorPlan: Anthropic reply", {
+            status: res.status,
+            ms: Date.now() - started,
+            model: json.model,
+            stopReason: json.stop_reason,
+            outputTokens: json.usage?.output_tokens,
+            textLength: text.length,
+        });
         await commit();
         return { text };
     }
