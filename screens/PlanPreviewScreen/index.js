@@ -36,6 +36,7 @@ import { FurnitureGlyph } from "../../components/FurnitureGlyph";
 import { FurnitureSheet } from "../../components/FurnitureSheet";
 import { FurnitureEditSheet } from "../../components/FurnitureEditSheet";
 import {
+    catalogEntry,
     cloneFurniture,
     createFurniture,
     footprintPx,
@@ -43,8 +44,10 @@ import {
     hitTestFurniture,
     normDeg,
     pointInFurniture,
+    PX_PER_IN,
     sortForDrawing,
     toContent as furnitureToContent,
+    toLocal as furnitureToLocal,
 } from "../../utils/furnitureCatalog";
 import { formatLength } from "../../utils/units";
 import { clashMessage, computeClashes } from "../../utils/furnitureClash";
@@ -85,7 +88,25 @@ const MIN_OPENING_WIDTH = 18; // content-space minimum width when resizing a win
 const OPENING_END_MARGIN = 6; // screen-space keep-away from the wall's own ends when resizing
 const OPENING_MENU_WIDTH = 336;
 const FURNITURE_MENU_WIDTH = 320;
-const ROTATE_HANDLE_GAP = 26; // screen-space distance of the rotate knob behind a selected piece
+const ROTATE_HANDLE_GAP = 40; // screen-space distance of the rotate knob behind a selected piece
+const RESIZE_HANDLE_SIZE = 10; // screen-space side of a resize handle square
+const RESIZE_HANDLE_HIT = 18; // screen-space grab radius of a resize handle
+const RESIZE_HANDLE_HIT_INSIDE = 9; // tighter radius when the touch is inside the piece (so small pieces stay movable)
+const MIN_FURNITURE_IN = 4; // smallest width/depth a piece can be dragged down to
+// Resize handles on the selected outline: corners resize both ways, edge
+// midpoints one way. (hx, hy) is the side in the piece's local frame.
+const RESIZE_HANDLES = [
+    [-1, -1],
+    [0, -1],
+    [1, -1],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+    [-1, 1],
+    [-1, 0],
+];
+// Pieces whose width and depth stay equal when resized (matches the edit sheet).
+const ROUND_SHAPES = new Set(["roundTable", "roundRug", "stool"]);
 const ROTATE_SNAP_DEG = 15; // rotation snaps to multiples of this when within ROTATE_SNAP_TOL
 const ROTATE_SNAP_TOL = 5;
 const FURNITURE_COLOR = "#7C5CFA"; // selection outline for furniture
@@ -481,6 +502,12 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
 
     // Content-space position of a piece's rotate knob: a constant screen
     // distance behind its back edge, so it stays grabbable at any zoom.
+    // Content-space position of a resize handle on a piece's outline.
+    const resizeHandlePos = (f, hx, hy) => {
+        const { w, d } = footprintPx(f);
+        return furnitureToContent(f, { x: (hx * w) / 2, y: (hy * d) / 2 });
+    };
+
     const rotateKnobPos = (f) => {
         const { d } = footprintPx(f);
         return furnitureToContent(f, { x: 0, y: -d / 2 - ROTATE_HANDLE_GAP / transform.s });
@@ -519,6 +546,27 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             const knob = rotateKnobPos(selectedPiece);
             if (Math.hypot(contentPoint.x - knob.x, contentPoint.y - knob.y) <= r) {
                 return { kind: "furnitureRotate", id: selectedPiece.id };
+            }
+            // Resize handles: the nearest one within reach. A touch inside the
+            // piece needs to be right on a handle, so small pieces can still
+            // be dragged around by their body.
+            const inside = pointInFurniture(selectedPiece, contentPoint, -4 / transform.s);
+            const reach =
+                (inside ? RESIZE_HANDLE_HIT_INSIDE : RESIZE_HANDLE_HIT) / transform.s;
+            let best = null;
+            for (const [hx, hy] of RESIZE_HANDLES) {
+                const hp = resizeHandlePos(selectedPiece, hx, hy);
+                const dist = Math.hypot(contentPoint.x - hp.x, contentPoint.y - hp.y);
+                if (dist <= reach && (!best || dist < best.dist)) best = { hx, hy, dist };
+            }
+            if (best) {
+                return {
+                    kind: "furnitureResize",
+                    id: selectedPiece.id,
+                    hx: best.hx,
+                    hy: best.hy,
+                    start: { ...selectedPiece },
+                };
             }
             if (pointInFurniture(selectedPiece, contentPoint, 2 / transform.s)) {
                 return {
@@ -586,6 +634,40 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                               x: contentPoint.x + target.offset.x,
                               y: contentPoint.y + target.offset.y,
                           }
+                        : f
+                )
+            );
+            return;
+        }
+
+        if (target.kind === "furnitureResize") {
+            // Work in the piece's local frame as it was when the drag began,
+            // keeping the opposite side(s) fixed so it grows where you pull.
+            const f0 = target.start;
+            const { hx, hy } = target;
+            const round = ROUND_SHAPES.has(catalogEntry(f0.type).shape);
+            const l = furnitureToLocal(f0, contentPoint);
+            const { w: W0, d: D0 } = footprintPx(f0);
+            const minPx = MIN_FURNITURE_IN * PX_PER_IN;
+            let wIn = f0.w;
+            let dIn = f0.d;
+            if (hx) wIn = Math.round(Math.max(minPx, hx * l.x + W0 / 2) / PX_PER_IN);
+            if (hy) dIn = Math.round(Math.max(minPx, hy * l.y + D0 / 2) / PX_PER_IN);
+            if (round) {
+                const v = hx && hy ? Math.max(wIn, dIn) : hx ? wIn : dIn;
+                wIn = v;
+                dIn = v;
+            }
+            const W = wIn * PX_PER_IN;
+            const D = dIn * PX_PER_IN;
+            const center = furnitureToContent(f0, {
+                x: hx ? (hx * (W - W0)) / 2 : 0,
+                y: hy ? (hy * (D - D0)) / 2 : 0,
+            });
+            setFurniture((fs) =>
+                fs.map((f) =>
+                    f.id === target.id
+                        ? { ...f, w: wIn, d: dIn, x: center.x, y: center.y }
                         : f
                 )
             );
@@ -1693,6 +1775,23 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                                 strokeWidth={1.6 / s}
                                                 strokeLinecap="round"
                                             />
+                                            {/* Resize handles */}
+                                            {RESIZE_HANDLES.map(([hx, hy]) => {
+                                                const hs = RESIZE_HANDLE_SIZE / s;
+                                                return (
+                                                    <Rect
+                                                        key={`rh${hx}${hy}`}
+                                                        x={hx * (w / 2 + 3 / s) - hs / 2}
+                                                        y={hy * (d / 2 + 3 / s) - hs / 2}
+                                                        width={hs}
+                                                        height={hs}
+                                                        rx={hx && hy ? 1.5 / s : hs / 2}
+                                                        fill={colors.surface}
+                                                        stroke={FURNITURE_COLOR}
+                                                        strokeWidth={2 / s}
+                                                    />
+                                                );
+                                            })}
                                         </G>
                                         <SvgText
                                             x={selectedPiece.x}
