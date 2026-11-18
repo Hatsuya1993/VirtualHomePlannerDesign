@@ -20,10 +20,11 @@ const designsCol = (uid) => collection(db, "users", uid, "designs");
 // while preserving the nested walls/openings (and furniture) structure.
 const clean = (list) => JSON.parse(JSON.stringify(list ?? []));
 
-export const saveDesign = async (uid, { walls, furniture, name }) => {
+export const saveDesign = async (uid, { walls, furniture, floors, name }) => {
     const ref = await addDoc(designsCol(uid), {
         walls: clean(walls),
         furniture: clean(furniture),
+        ...(floors ? { floors: clean(floors) } : {}),
         name: name || "Untitled plan",
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -31,12 +32,13 @@ export const saveDesign = async (uid, { walls, furniture, name }) => {
     return ref.id;
 };
 
-export const updateDesign = (uid, id, { walls, furniture, name }) =>
+export const updateDesign = (uid, id, { walls, furniture, floors, name }) =>
     setDoc(
         doc(db, "users", uid, "designs", id),
         {
             walls: clean(walls),
             furniture: clean(furniture),
+            ...(floors ? { floors: clean(floors) } : {}),
             ...(name ? { name } : {}),
             updatedAt: serverTimestamp(),
         },

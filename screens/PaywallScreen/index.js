@@ -69,6 +69,11 @@ const FEATURES = [
         sub: "Drop in furniture and decor, and see your space reimagined.",
     },
     {
+        icon: "layers-outline",
+        title: "Multiple floors and stairs",
+        sub: "Add more floors, place and design stairs, and walk between levels in 3D.",
+    },
+    {
         icon: "flash-outline",
         title: "Every new AI feature included",
         sub: "You get each tool we ship, at no extra cost.",

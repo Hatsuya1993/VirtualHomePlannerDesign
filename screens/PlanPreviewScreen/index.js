@@ -67,6 +67,9 @@ import {
 import { buildPlanHtml, buildShareText, computeStats } from "../../utils/planStats";
 import { useAuth } from "../../context/AuthContext";
 import { renameDesign, saveDesign, updateDesign } from "../../utils/designs";
+import { useEntitlements } from "../../context/EntitlementsContext";
+import { FloorSheet } from "../../components/FloorSheet";
+import { defaultFloorName, floorsFromParams, makeFloor, outerWallsOf } from "../../utils/floors";
 import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
@@ -271,6 +274,16 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     const [furnitureEditVisible, setFurnitureEditVisible] = useState(false);
     const [clashWarningVisible, setClashWarningVisible] = useState(false);
     const { units } = useUnits();
+    const { pro } = useEntitlements();
+    // Multi-floor: `floors` holds every floor; the one being edited lives in
+    // the `walls`/`furniture` state above (its entry in `floors` is synced on
+    // floor switch / save / navigation via syncedFloors()).
+    const [floors, setFloors] = useState(() => floorsFromParams(route.params));
+    const [floorIndex, setFloorIndex] = useState(() =>
+        Math.min(route.params?.floorIndex ?? 0, floorsFromParams(route.params).length - 1)
+    );
+    const [floorSheetVisible, setFloorSheetVisible] = useState(false);
+    const [renamingFloor, setRenamingFloor] = useState(null); // floor index | null
     const svgRef = useRef(null);
 
     // Undo/redo history for wall + furniture edits. `wallsRef`/`furnitureRef`
@@ -392,7 +405,12 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 file.create();
                 file.write(
                     JSON.stringify(
-                        { walls, furniture, savedAt: new Date().toISOString() },
+                        {
+                            walls,
+                            furniture,
+                            floors: syncedFloors(),
+                            savedAt: new Date().toISOString(),
+                        },
                         null,
                         2
                     )
@@ -1170,21 +1188,119 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         );
     };
 
+    // --- Floors --------------------------------------------------------
+
+    // Every floor, with the one being edited updated from the live state.
+    const syncedFloors = () =>
+        floors.map((f, i) =>
+            i === floorIndex ? { ...f, walls: wallsRef.current, furniture: furnitureRef.current } : f
+        );
+
+    // Make floor `i` the one being edited. Undo history covers one floor at a
+    // time, so it's cleared on a switch.
+    const loadFloor = (fs, i) => {
+        setFloors(fs);
+        setFloorIndex(i);
+        wallsRef.current = fs[i].walls;
+        furnitureRef.current = fs[i].furniture;
+        setWalls(fs[i].walls);
+        setFurniture(fs[i].furniture);
+        clearSelectionState();
+        undoStack.current = [];
+        redoStack.current = [];
+        pendingSnapRef.current = null;
+        setWarningVisible(false);
+        setClashWarningVisible(false);
+        bumpHist();
+    };
+
+    const selectFloor = (i) => {
+        setFloorSheetVisible(false);
+        if (i === floorIndex) return;
+        loadFloor(syncedFloors(), i);
+    };
+
+    // Adding floors is a PRO feature. A new floor goes on top of the building
+    // and starts with the top floor's outer walls (or blank).
+    const addFloor = (blank) => {
+        if (!pro) {
+            setFloorSheetVisible(false);
+            navigation.navigate("Paywall");
+            return;
+        }
+        const fs = syncedFloors();
+        const top = fs[fs.length - 1];
+        const next = makeFloor(fs.length, blank ? [] : outerWallsOf(top.walls), []);
+        setFloorSheetVisible(false);
+        loadFloor([...fs, next], fs.length);
+    };
+
+    const setFloorHeight = (i, heightIn) =>
+        setFloors((fs) => fs.map((f, j) => (j === i ? { ...f, heightIn } : f)));
+
+    const applyFloorRename = (text) => {
+        const next = (text || "").trim();
+        const i = renamingFloor;
+        if (i === null || !next) return;
+        setFloors((fs) => fs.map((f, j) => (j === i ? { ...f, name: next } : f)));
+    };
+
+    const deleteFloor = (i) => {
+        if (floors.length <= 1) return;
+        Alert.alert(
+            "Delete floor",
+            `Delete "${floors[i].name}" and everything on it? This can't be undone.`,
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Delete",
+                    style: "destructive",
+                    onPress: () => {
+                        // Renumber floors that still carry a default name.
+                        const fs = syncedFloors()
+                            .filter((_, j) => j !== i)
+                            .map((f, j) =>
+                                /^(Ground floor|Floor \d+)$/.test(f.name)
+                                    ? { ...f, name: defaultFloorName(j) }
+                                    : f
+                            );
+                        setFloorSheetVisible(false);
+                        // Stay on the same floor if another was deleted below it,
+                        // otherwise land on the floor that took its place.
+                        const keep = i < floorIndex ? floorIndex - 1 : i === floorIndex ? Math.min(i, fs.length - 1) : floorIndex;
+                        loadFloor(fs, keep);
+                    },
+                },
+            ]
+        );
+    };
+
+    const floorBelow = floorIndex > 0 ? floors[floorIndex - 1] : null;
+
     const handleSave = async () => {
         if (!user) {
             Alert.alert("Sign in required", "Please sign in to save your design.");
             return;
         }
-        if (walls.length === 0) {
+        const allFloors = syncedFloors();
+        if (allFloors.every((f) => f.walls.length === 0)) {
             Alert.alert("Nothing to save", "Draw some walls first.");
             return;
         }
+        // Floor 1 also goes in the legacy top-level fields (thumbnails, older
+        // app versions); every floor goes in `floors`.
+        const payload = {
+            walls: allFloors[0].walls,
+            furniture: allFloors[0].furniture,
+            floors: allFloors,
+            name,
+        };
         setSaving(true);
         try {
             if (savedId) {
-                await updateDesign(user.uid, savedId, { walls, furniture, name });
+                await updateDesign(user.uid, savedId, payload);
             } else {
-                const id = await saveDesign(user.uid, { walls, furniture, name });
+                const id = await saveDesign(user.uid, payload);
                 setSavedId(id);
             }
             Alert.alert("Saved", "Your design is in My Designs.");
@@ -1507,6 +1623,23 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                 ))}
                             </G>
                         )}
+
+                        {/* Faint outline of the floor below, for lining up walls */}
+                        {floorBelow &&
+                            floorBelow.walls.map((w, i) => (
+                                <Line
+                                    key={`below${i}`}
+                                    x1={w.x1}
+                                    y1={w.y1}
+                                    x2={w.x2}
+                                    y2={w.y2}
+                                    stroke="#94A3B8"
+                                    strokeWidth={2 / transform.s}
+                                    strokeDasharray={`${8 / transform.s} ${6 / transform.s}`}
+                                    strokeLinecap="round"
+                                    opacity={0.8}
+                                />
+                            ))}
 
                         {/* Furniture (under the walls, so pieces pushed
                             against a wall tuck neatly beneath its line) */}
@@ -1854,6 +1987,23 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                     </G>
                 </Svg>
 
+                {/* Floor switcher */}
+                <AnimatedPressable
+                    onPress={() => {
+                        setMoreMenuVisible(false);
+                        setShareMenuVisible(false);
+                        setFloorSheetVisible(true);
+                    }}
+                    scaleTo={0.95}
+                    style={styles.floorChip}
+                >
+                    <Ionicons name="layers-outline" size={16} color={colors.text} />
+                    <Text style={styles.floorChipText} numberOfLines={1}>
+                        {floors[floorIndex]?.name}
+                    </Text>
+                    <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
+                </AnimatedPressable>
+
                 {/* Selected-wall context menu (hidden while an opening is picked) */}
                 {menuPos && !selectedOpening && (
                     <View style={[styles.contextMenu, menuPos]}>
@@ -1963,7 +2113,13 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                             ? setWarningVisible(true)
                             : hasClash
                             ? setClashWarningVisible(true)
-                            : navigation.navigate("Room3D", { walls, furniture, name })
+                            : navigation.navigate("Room3D", {
+                                  walls,
+                                  furniture,
+                                  name,
+                                  floors: syncedFloors(),
+                                  floorIndex,
+                              })
                     }
                     scaleTo={0.9}
                     style={styles.tool}
@@ -2006,6 +2162,10 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                             // Carried through wall drawing and handed back on
                             // "Done" so placed furniture isn't lost.
                             furniture,
+                            // Likewise the other floors, so drawing walls on
+                            // one floor keeps the rest of the building.
+                            floors: syncedFloors(),
+                            floorIndex,
                             imageUri,
                         })
                     }
@@ -2023,6 +2183,31 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 pixelsPerFoot={PIXELS_PER_FOOT}
                 onClose={() => setSizeSheetVisible(false)}
                 onApply={applyWallSize}
+            />
+
+            <FloorSheet
+                visible={floorSheetVisible}
+                floors={floors.map((f, i) =>
+                    i === floorIndex ? { ...f, walls, furniture } : f
+                )}
+                activeIndex={floorIndex}
+                pro={pro}
+                onSelect={selectFloor}
+                onAdd={addFloor}
+                onRename={(i) => setRenamingFloor(i)}
+                onHeight={setFloorHeight}
+                onDelete={deleteFloor}
+                onClose={() => setFloorSheetVisible(false)}
+            />
+            <PromptModal
+                visible={renamingFloor !== null}
+                title="Rename floor"
+                message="Enter a name for this floor."
+                placeholder="Floor name"
+                initialValue={renamingFloor !== null ? floors[renamingFloor]?.name ?? "" : ""}
+                confirmLabel="Save"
+                onSubmit={applyFloorRename}
+                onClose={() => setRenamingFloor(null)}
             />
 
             <FurnitureSheet
@@ -2135,6 +2320,30 @@ const styles = StyleSheet.create({
     },
     furnitureMenu: {
         width: FURNITURE_MENU_WIDTH,
+    },
+    floorChip: {
+        position: "absolute",
+        top: 10,
+        left: 12,
+        maxWidth: 200,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 6,
+        height: 34,
+        paddingHorizontal: 12,
+        borderRadius: radius.pill,
+        backgroundColor: colors.surface,
+        shadowColor: "#0F172A",
+        shadowOpacity: 0.12,
+        shadowRadius: 10,
+        shadowOffset: { width: 0, height: 4 },
+        elevation: 6,
+    },
+    floorChipText: {
+        flexShrink: 1,
+        fontSize: 13,
+        fontWeight: "700",
+        color: colors.text,
     },
     contextLabel: {
         fontSize: 12,

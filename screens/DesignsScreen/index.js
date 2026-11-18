@@ -69,6 +69,8 @@ export const DesignsScreen = ({ navigation }) => {
         navigation.navigate("PlanPreview", {
             walls: design.walls,
             furniture: design.furniture ?? [],
+            floors: design.floors,
+            floorIndex: 0,
             designId: design.id,
             designName: design.name,
         });

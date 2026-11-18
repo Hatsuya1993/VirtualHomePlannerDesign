@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { chainRoom, roomOutline } from "../../utils/roomGeometry";
 import { buildFurniture, insideCollider } from "../../utils/furniture3D";
+import { floorsFromParams, floorShortLabel } from "../../utils/floors";
 import { createCameraRig } from "./cameraRig";
 import {
     addEnvironment,
@@ -193,7 +194,7 @@ const distanceToWallSegment = (x, z, s) => {
 
 // Builds the Three.js scene (floor, ceiling, extruded walls, furniture, a
 // pendant light) from the 2D plan, in feet, centered on the room.
-const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
+const buildScene = (walls, { maxAnisotropy = 1, furniture = [], origin = null } = {}) => {
     const scene = new THREE.Scene();
     // Door pivots to animate open in the render loop: { pivot, base, target }.
     const doors = [];
@@ -208,8 +209,9 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
     const polygon = roomOutline(walls) || chainRoom(walls).polygon;
     const xs = polygon.map((p) => p.x);
     const ys = polygon.map((p) => p.y);
-    const centerX = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0;
-    const centerY = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : 0;
+    // A multi-floor building passes one shared origin so every floor lines up.
+    const centerX = origin ? origin.x : xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0;
+    const centerY = origin ? origin.y : ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : 0;
     const toFeet = (x, y) => ({
         x: (x - centerX) / PIXELS_PER_FOOT,
         z: (y - centerY) / PIXELS_PER_FOOT,
@@ -590,6 +592,111 @@ const buildScene = (walls, { maxAnisotropy = 1, furniture = [] } = {}) => {
     };
 };
 
+const SLAB_COLOR = "#E9E5DE";
+
+// A floor slab: the room outline extruded `depth` feet downward from the
+// floor level, with optional holes (stairwells) as world-feet polygons.
+const floorSlabGeometry = (outline, depth, holes = []) => {
+    const shape = new THREE.Shape(outline.map((p) => new THREE.Vector2(p.x, p.z)));
+    (holes ?? []).forEach((h) => shape.holes.push(new THREE.Path(h.map((p) => new THREE.Vector2(p.x, p.z)))));
+    const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+    // Shape (x, y) → world (x, z); extrusion (+z) → downward. Sit a hair
+    // below the floor surface so the wood floor isn't z-fighting the slab top.
+    geo.rotateX(Math.PI / 2);
+    geo.translate(0, -0.01, 0);
+    return geo;
+};
+
+// Builds every floor of a design with buildScene, stacked at its elevation
+// in one scene sharing a single origin. Each floor lives in its own group (so
+// the 3D floor picker can hide the ones above), with its contact shadows,
+// wall occlusion and cutaway wall groups. Returns per-floor data for the
+// camera (walk collision, room center, ceiling) plus the overall bounds.
+const buildBuilding = (floors, { maxAnisotropy = 1 } = {}) => {
+    const scene = new THREE.Scene();
+    // Shared origin: the center of every floor's walls together.
+    const pts = floors.flatMap((f) => (f.walls ?? []).flatMap((w) => [w.x1, w.y1, w.x2, w.y2]));
+    const xs = pts.filter((_, i) => i % 2 === 0);
+    const ys = pts.filter((_, i) => i % 2 === 1);
+    const origin = xs.length
+        ? { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 }
+        : { x: 0, y: 0 };
+
+    let elevIn = 0;
+    const levels = floors.map((f, i) => {
+        const base = elevIn / 12;
+        elevIn += f.heightIn || 120;
+        const group = new THREE.Group();
+        group.position.y = base;
+        scene.add(group);
+        if (!f.walls?.length) {
+            return { group, base, empty: true, doors: [], wallGroups: [], pendant: [], ceilingMesh: null };
+        }
+        const r = buildScene(f.walls, { maxAnisotropy, furniture: f.furniture ?? [], origin });
+        // Move the floor's meshes into its group. Upper floors drop the
+        // scene-wide fill lights (only one set is needed) but keep their
+        // own pendant lamp.
+        [...r.scene.children].forEach((o) => {
+            if (i > 0 && (o.isHemisphereLight || o.isDirectionalLight)) return;
+            group.add(o);
+        });
+        // Upper floors sit on a slab filling the gap down to the walls below.
+        if (i > 0 && r.roomPolygon.length >= 3) {
+            const below = floors[i - 1];
+            const belowWallFt = Math.max(
+                ...(below.walls?.length ? below.walls : [{}]).map((w) => (w.heightIn ?? DEFAULT_HEIGHT_IN) / 12)
+            );
+            const depth = Math.min(1.5, Math.max(0.15, (below.heightIn || 120) / 12 - belowWallFt));
+            const slab = new THREE.Mesh(
+                floorSlabGeometry(r.roomPolygon, depth, f.slabHoles),
+                new THREE.MeshStandardMaterial({ color: SLAB_COLOR, roughness: 0.9 })
+            );
+            group.add(slab);
+        }
+        addFurnitureShadows(group, f.furniture ?? [], r.toFeet);
+        addWallOcclusion(group, r.wallParts);
+        const wallGroups = groupWalls(group, r.wallParts, r.roomCenter);
+
+        // Walk collision for this floor (see the single-floor notes below).
+        const furnitureSegments = r.furnitureColliders
+            .filter((c) => !insideCollider(c, r.roomCenter.x, r.roomCenter.z))
+            .flatMap((c) => c.segs);
+        const blocked = (x, z) =>
+            r.collisionSegments.some((sg) => distanceToWallSegment(x, z, sg) < WALL_COLLIDE_MARGIN) ||
+            furnitureSegments.some((sg) => distanceToWallSegment(x, z, sg) < FURNITURE_COLLIDE_MARGIN);
+
+        return {
+            group,
+            base,
+            empty: false,
+            doors: r.doors,
+            wallGroups,
+            ceilingMesh: r.ceilingMesh,
+            pendant: r.pendant,
+            roomCenter: r.roomCenter,
+            ceilingHeight: r.ceilingHeight,
+            roomPolygon: r.roomPolygon,
+            blocked,
+            toFeet: r.toFeet,
+        };
+    });
+
+    // Floors with no walls borrow the nearest floor's footprint for the camera.
+    const solid = levels.filter((l) => !l.empty);
+    const fallback = solid[0];
+    levels.forEach((l) => {
+        if (!l.empty || !fallback) return;
+        Object.assign(l, {
+            roomCenter: fallback.roomCenter,
+            ceilingHeight: fallback.ceilingHeight,
+            roomPolygon: fallback.roomPolygon,
+            blocked: () => false,
+        });
+    });
+    const allPts = solid.flatMap((l) => l.roomPolygon ?? []);
+    return { scene, levels, allPts, origin };
+};
+
 // Bounding box of the room outline in world feet.
 const roomBounds = (pts, fallback) => {
     if (!pts || pts.length < 3) {
@@ -625,9 +732,11 @@ const TAP_SLOP = 10;
 // Top (plan view) and Walk (first person) — plus soft shadows, a sky and a
 // render-on-demand loop that stops drawing when nothing moves.
 export const Room3DScreen = ({ navigation, route }) => {
-    const walls = route.params?.walls ?? [];
-    const furniture = route.params?.furniture ?? [];
     const planName = route.params?.name;
+    // Every floor of the design (a single floor for older plans).
+    const floors = useRef(floorsFromParams(route.params)).current;
+    const startFloor = Math.min(route.params?.floorIndex ?? 0, floors.length - 1);
+    const hasAnyWalls = floors.some((f) => f.walls?.length);
 
     // Explicit, synchronously-available numeric dimensions for the GL
     // surface. gl.drawingBufferWidth/Height (and even RN's own onLayout on
@@ -640,6 +749,11 @@ export const Room3DScreen = ({ navigation, route }) => {
     winRef.current = { w: winWidth, h: winHeight };
 
     const [mode, setModeState] = useState("orbit");
+    // Which floor is in focus: it and every floor below are shown, the ones
+    // above are hidden; Walk mode walks on it.
+    const [focusFloor, setFocusFloorState] = useState(startFloor);
+    const focusRef = useRef(startFloor);
+    const levelsRef = useRef(null);
     const modeRef = useRef("orbit");
     const [ready, setReady] = useState(false);
     const [hint, setHint] = useState(null);
@@ -720,6 +834,27 @@ export const Room3DScreen = ({ navigation, route }) => {
 
     const resetView = () => {
         rigRef.current?.reset();
+        dirtyRef.current = true;
+    };
+
+    // Focus a floor: show it and the floors below, hide the ones above, and
+    // move the camera to its level. `teleport` is false when walking up or
+    // down stairs (the walker is carried there instead).
+    const setFocusFloor = (i, teleport = true) => {
+        const levels = levelsRef.current;
+        focusRef.current = i;
+        setFocusFloorState(i);
+        if (!levels || !rigRef.current) return;
+        levels.forEach((l, j) => (l.group.visible = j <= i));
+        rigRef.current.setLevel(
+            {
+                baseY: levels[i].base,
+                blocked: levels[i].blocked,
+                roomCenter: levels[i].roomCenter,
+                ceilingHeight: levels[i].ceilingHeight,
+            },
+            teleport
+        );
         dirtyRef.current = true;
     };
 
@@ -839,34 +974,16 @@ export const Room3DScreen = ({ navigation, route }) => {
             renderer.toneMappingExposure = 0.95;
 
             const maxAnisotropy = renderer.capabilities?.getMaxAnisotropy?.() ?? 1;
-            const {
-                scene,
-                ceilingHeight,
-                roomCenter,
-                doors,
-                collisionSegments,
-                furnitureColliders,
-                wallParts,
-                ceilingMesh,
-                pendant,
-                roomPolygon,
-                toFeet,
-            } = buildScene(walls, { maxAnisotropy, furniture });
-
-            const disposeEnv = addEnvironment(scene);
-            addFurnitureShadows(scene, furniture, toFeet);
-            addWallOcclusion(scene, wallParts);
-            const wallGroups = groupWalls(scene, wallParts, roomCenter);
-
             // Furniture you'd bump into blocks walking too — except any piece
             // the camera starts inside (e.g. a table at the room's center),
-            // which would otherwise trap you.
-            const furnitureSegments = furnitureColliders
-                .filter((c) => !insideCollider(c, roomCenter.x, roomCenter.z))
-                .flatMap((c) => c.segs);
-            const blocked = (x, z) =>
-                collisionSegments.some((sg) => distanceToWallSegment(x, z, sg) < WALL_COLLIDE_MARGIN) ||
-                furnitureSegments.some((sg) => distanceToWallSegment(x, z, sg) < FURNITURE_COLLIDE_MARGIN);
+            // which would otherwise trap you. (Handled per floor in buildBuilding.)
+            const { scene, levels, allPts } = buildBuilding(floors, { maxAnisotropy });
+            levelsRef.current = levels;
+            const disposeEnv = addEnvironment(scene);
+            const doors = levels.flatMap((l) => l.doors);
+            const wallGroups = levels.flatMap((l) => l.wallGroups);
+            const start = levels[focusRef.current];
+            levels.forEach((l, i) => (l.group.visible = i <= focusRef.current));
 
             // Release every GPU/CPU resource when the screen unmounts.
             glCleanupRef.current = () => {
@@ -889,10 +1006,11 @@ export const Room3DScreen = ({ navigation, route }) => {
             };
 
             const rig = createCameraRig({
-                bounds: roomBounds(roomPolygon, roomCenter),
-                roomCenter,
-                ceilingHeight,
-                blocked,
+                bounds: roomBounds(allPts, start.roomCenter),
+                roomCenter: start.roomCenter,
+                ceilingHeight: start.ceilingHeight,
+                blocked: start.blocked,
+                baseY: start.base,
                 aspect: winWidth / winHeight,
             });
             rig.setMode(modeRef.current);
@@ -914,6 +1032,7 @@ export const Room3DScreen = ({ navigation, route }) => {
             const hit = new THREE.Vector3();
             floorTapRef.current = (sx, sy) => {
                 const { w, h } = winRef.current;
+                floorPlane.constant = -rig.baseY; // the focused floor's level
                 raycaster.setFromCamera(new THREE.Vector2((sx / w) * 2 - 1, -(sy / h) * 2 + 1), camera);
                 if (raycaster.ray.intersectPlane(floorPlane, hit)) {
                     rig.floorTap(hit.x, hit.z);
@@ -946,8 +1065,10 @@ export const Room3DScreen = ({ navigation, route }) => {
                     if (shownMode !== rig.mode) {
                         shownMode = rig.mode;
                         const inside = rig.mode === "walk";
-                        if (ceilingMesh) ceilingMesh.visible = inside;
-                        pendant.forEach((m) => (m.visible = inside));
+                        levels.forEach((l) => {
+                            if (l.ceilingMesh) l.ceilingMesh.visible = inside;
+                            l.pendant.forEach((m) => (m.visible = inside));
+                        });
                         needsDraw = true;
                     }
 
@@ -1029,7 +1150,7 @@ export const Room3DScreen = ({ navigation, route }) => {
                 <Text style={styles.loaderText}>Building your room…</Text>
             </Animated.View>
 
-            {walls.length === 0 && (
+            {!hasAnyWalls && (
                 <View style={styles.centerMessage} pointerEvents="none">
                     <Text style={styles.centerMessageText}>No room data was passed to this screen.</Text>
                 </View>
@@ -1053,6 +1174,7 @@ export const Room3DScreen = ({ navigation, route }) => {
                         <View style={styles.titlePill}>
                             <Text style={styles.titleText} numberOfLines={1}>
                                 {planName || "3D view"}
+                                {floors.length > 1 ? ` · ${floors[focusFloor]?.name}` : ""}
                             </Text>
                         </View>
                         <View style={styles.roundSpacer} />
@@ -1092,6 +1214,30 @@ export const Room3DScreen = ({ navigation, route }) => {
                     style={[styles.bottomArea, { paddingBottom: Math.max(insets.bottom, 12) }]}
                     pointerEvents="box-none"
                 >
+                {/* Floor picker (multi-floor designs): top floor first */}
+                {floors.length > 1 && (
+                    <View style={[styles.floorPicker, { top: insets.top + 120 }]}>
+                        {floors
+                            .map((f, i) => i)
+                            .reverse()
+                            .map((i) => {
+                                const active = i === focusFloor;
+                                return (
+                                    <AnimatedPressable
+                                        key={floors[i].id}
+                                        onPress={() => setFocusFloor(i)}
+                                        scaleTo={0.9}
+                                        style={[styles.floorButton, active && styles.floorButtonActive]}
+                                    >
+                                        <Text style={[styles.floorButtonText, active && styles.floorButtonTextActive]}>
+                                            {floorShortLabel(i)}
+                                        </Text>
+                                    </AnimatedPressable>
+                                );
+                            })}
+                    </View>
+                )}
+
                 {/* First-time hint for the current mode */}
                 {hint && (
                     <Animated.View style={[styles.hint, { opacity: hintOpacity }]} pointerEvents="none">
@@ -1351,6 +1497,32 @@ const styles = StyleSheet.create({
         fontWeight: "600",
         color: "#FFFFFF",
         marginTop: 2,
+    },
+    floorPicker: {
+        position: "absolute",
+        right: 12,
+        padding: 4,
+        gap: 4,
+        borderRadius: 22,
+        backgroundColor: GLASS,
+    },
+    floorButton: {
+        width: 36,
+        height: 36,
+        borderRadius: 18,
+        alignItems: "center",
+        justifyContent: "center",
+    },
+    floorButtonActive: {
+        backgroundColor: "#FFFFFF",
+    },
+    floorButtonText: {
+        fontSize: 14,
+        fontWeight: "800",
+        color: "#FFFFFF",
+    },
+    floorButtonTextActive: {
+        color: colors.text,
     },
     stickLayer: {
         position: "absolute",

@@ -14,7 +14,7 @@ const MAX_ELEV_IN = 120;
 
 // One dimension row with − / + buttons. Holding a button repeats, speeding up
 // the longer it is held. `step` is in inches (1" imperial, 1 cm metric).
-const Stepper = ({ label, value, onChange, step, min, max, units }) => {
+export const Stepper = ({ label, value, onChange, step, min, max, units }) => {
     const timer = useRef(null);
     const valueRef = useRef(value);
     valueRef.current = value;

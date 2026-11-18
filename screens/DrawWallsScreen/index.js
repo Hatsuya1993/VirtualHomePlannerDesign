@@ -50,12 +50,20 @@ export const DrawWallsScreen = ({ navigation, route }) => {
     // Furniture placed in Plan Preview isn't edited here, just carried back
     // to Plan Preview on "Done" so it survives a round of wall drawing.
     const furnitureRef = useRef(route.params?.furniture ?? []);
+    // Same for the design's other floors and which one is being drawn.
+    const floorsRef = useRef({ floors: route.params?.floors, floorIndex: route.params?.floorIndex });
 
     // Pick up edits made after "Done" (e.g. a wall deleted in Plan Preview)
     // when navigation lands back here with fresh params.
     useEffect(() => {
         if (route.params?.updatedWalls) {
             furnitureRef.current = route.params.furniture ?? furnitureRef.current;
+            if (route.params.floors) {
+                floorsRef.current = {
+                    floors: route.params.floors,
+                    floorIndex: route.params.floorIndex,
+                };
+            }
             setWalls(route.params.updatedWalls);
             setUndoStack([]);
             setRedoStack([]);
@@ -325,6 +333,7 @@ export const DrawWallsScreen = ({ navigation, route }) => {
                                 walls,
                                 imageUri,
                                 furniture: furnitureRef.current,
+                                ...floorsRef.current,
                             });
                         }
                     }}

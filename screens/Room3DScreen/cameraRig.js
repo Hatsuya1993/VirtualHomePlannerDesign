@@ -31,14 +31,21 @@ const MODE_TRANSITION_S = 0.75;
 const damp = (rate, dt) => 1 - Math.exp(-rate * dt);
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
-export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, aspect }) => {
+export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, aspect, baseY = 0 }) => {
     // bounds: { minX, maxX, minZ, maxZ } of the room in feet.
     const cx = (bounds.minX + bounds.maxX) / 2;
     const cz = (bounds.minZ + bounds.maxZ) / 2;
     const halfW = Math.max(4, (bounds.maxX - bounds.minX) / 2);
     const halfD = Math.max(4, (bounds.maxZ - bounds.minZ) / 2);
     const radius = Math.hypot(halfW, halfD);
-    const eye = Math.min(EYE_HEIGHT_FT, ceilingHeight - 0.5);
+    // The floor level the camera is on (multi-floor buildings): its height
+    // above ground, walk collision, starting point and eye height.
+    const level = {
+        baseY,
+        blocked,
+        roomCenter,
+        eye: Math.min(EYE_HEIGHT_FT, ceilingHeight - 0.5),
+    };
 
     const fitOrbitDist = () => (radius / Math.sin((FOV.orbit * Math.PI) / 360)) * 1.02;
     const fitTopDist = (asp) => {
@@ -85,10 +92,11 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
     const desiredPose = (outPos, outLook) => {
         if (s.mode === "walk") {
             const w = s.walk;
-            outPos.set(w.x, eye, w.z);
+            const eyeY = level.baseY + level.eye;
+            outPos.set(w.x, eyeY, w.z);
             outLook.set(
                 w.x - Math.sin(w.yaw) * Math.cos(w.pitch),
-                eye + Math.sin(w.pitch),
+                eyeY + Math.sin(w.pitch),
                 w.z - Math.cos(w.yaw) * Math.cos(w.pitch)
             );
             return;
@@ -96,7 +104,7 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
         const o = s.mode === "top" ? view.top : view.orbit;
         const yaw = s.mode === "top" ? 0 : o.yaw;
         const pitch = s.mode === "top" ? TOP_PITCH : o.pitch;
-        const lookY = s.mode === "top" ? 0 : 1.2;
+        const lookY = level.baseY + (s.mode === "top" ? 0 : 1.2);
         outLook.set(o.tx, lookY, o.tz);
         outPos.set(
             o.tx + Math.sin(yaw) * Math.cos(pitch) * o.dist,
@@ -171,6 +179,7 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
             }
         };
         // Full move, else slide along whichever axis is clear.
+        const blocked = level.blocked;
         if (!blocked(nx, nz)) {
             w.x = nx;
             w.z = nz;
@@ -210,6 +219,33 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
             s.aspect = a;
         },
 
+        // Move to another floor of the building. `teleport` puts the walker at
+        // that floor's room center (used by the floor picker); stairs (which
+        // carry the walker across) pass false. `eye` is the eye height above
+        // the floor, which stairs vary as you climb.
+        setLevel({ baseY: y, blocked: b, roomCenter: rc, ceilingHeight: ch }, teleport = true) {
+            level.baseY = y;
+            level.blocked = b;
+            level.roomCenter = rc;
+            level.eye = Math.min(EYE_HEIGHT_FT, ch - 0.5);
+            if (teleport) {
+                s.walk.x = rc.x;
+                s.walk.z = rc.z;
+                s.walk.vx = 0;
+                s.walk.vz = 0;
+                s.walk.glide = null;
+                s.transition = MODE_TRANSITION_S;
+            }
+        },
+
+        get walkPos() {
+            return { x: s.walk.x, z: s.walk.z };
+        },
+
+        get baseY() {
+            return level.baseY;
+        },
+
         setMode(mode) {
             if (mode === s.mode) return;
             s.mode = mode;
@@ -224,8 +260,8 @@ export const createCameraRig = ({ bounds, roomCenter, ceilingHeight, blocked, as
                 Object.assign(s.top, { tx: cx, tz: cz, dist: fitTopDist(s.aspect) });
             } else {
                 Object.assign(s.walk, {
-                    x: roomCenter.x,
-                    z: roomCenter.z,
+                    x: level.roomCenter.x,
+                    z: level.roomCenter.z,
                     dYaw: 0,
                     dPitch: 0,
                     vx: 0,
