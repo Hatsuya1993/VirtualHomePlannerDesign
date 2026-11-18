@@ -14,7 +14,7 @@ import {
     View,
 } from "react-native";
 import * as THREE from "three";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
 import { chainRoom, roomOutline } from "../../utils/roomGeometry";
 import { buildFurniture, insideCollider } from "../../utils/furniture3D";
@@ -635,6 +635,7 @@ export const Room3DScreen = ({ navigation, route }) => {
     // timing — driving the renderer/camera from this hook instead sidesteps
     // that whole class of bug.
     const { width: winWidth, height: winHeight } = useWindowDimensions();
+    const insets = useSafeAreaInsets();
     const winRef = useRef({ w: winWidth, h: winHeight });
     winRef.current = { w: winWidth, h: winHeight };
 
@@ -1034,9 +1035,12 @@ export const Room3DScreen = ({ navigation, route }) => {
                 </View>
             )}
 
-            <SafeAreaView style={styles.overlay} edges={["top", "bottom"]} pointerEvents="box-none">
+            {/* Controls overlay. Top and bottom bars are absolutely anchored
+                (with the safe-area insets) rather than pushed apart by flex,
+                which didn't stretch to full height on iOS. */}
+            <View style={[styles.overlay, { width: winWidth, height: winHeight }]} pointerEvents="box-none">
                 {/* Top bar: close, plan name, mode switch */}
-                <View style={styles.topBar} pointerEvents="box-none">
+                <View style={[styles.topBar, { top: insets.top + 6 }]} pointerEvents="box-none">
                     <View style={styles.titleRow} pointerEvents="box-none">
                         <AnimatedPressable
                             onPress={() => navigation.goBack()}
@@ -1079,13 +1083,15 @@ export const Room3DScreen = ({ navigation, route }) => {
                 </View>
 
                 {glError && (
-                    <View style={styles.errorBox} pointerEvents="none">
+                    <View style={[styles.errorBox, { top: insets.top + 110 }]} pointerEvents="none">
                         <Text style={styles.errorText}>{glError}</Text>
                     </View>
                 )}
 
-                <View style={styles.flexSpacer} pointerEvents="none" />
-
+                <View
+                    style={[styles.bottomArea, { paddingBottom: Math.max(insets.bottom, 12) }]}
+                    pointerEvents="box-none"
+                >
                 {/* First-time hint for the current mode */}
                 {hint && (
                     <Animated.View style={[styles.hint, { opacity: hintOpacity }]} pointerEvents="none">
@@ -1123,7 +1129,8 @@ export const Room3DScreen = ({ navigation, route }) => {
                         </View>
                     )}
                 </View>
-            </SafeAreaView>
+                </View>
+            </View>
         </View>
     );
 };
@@ -1187,7 +1194,9 @@ const styles = StyleSheet.create({
         left: 0,
     },
     overlay: {
-        ...StyleSheet.absoluteFillObject,
+        position: "absolute",
+        top: 0,
+        left: 0,
     },
     loader: {
         ...StyleSheet.absoluteFillObject,
@@ -1214,8 +1223,9 @@ const styles = StyleSheet.create({
         textAlign: "center",
     },
     errorBox: {
-        marginTop: 12,
-        marginHorizontal: 16,
+        position: "absolute",
+        left: 16,
+        right: 16,
         backgroundColor: "rgba(200,30,30,0.92)",
         borderRadius: 12,
         padding: 14,
@@ -1226,9 +1236,17 @@ const styles = StyleSheet.create({
         fontWeight: "600",
     },
     topBar: {
+        position: "absolute",
+        left: 0,
+        right: 0,
         paddingHorizontal: 12,
-        paddingTop: 6,
         alignItems: "center",
+    },
+    bottomArea: {
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: 0,
     },
     titleRow: {
         flexDirection: "row",
@@ -1286,9 +1304,6 @@ const styles = StyleSheet.create({
     },
     segmentTextActive: {
         color: colors.text,
-    },
-    flexSpacer: {
-        flex: 1,
     },
     hint: {
         flexDirection: "row",
