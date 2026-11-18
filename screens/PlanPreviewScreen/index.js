@@ -24,6 +24,7 @@ import Svg, {
     Path,
     Polygon,
     Rect,
+    Text as SvgText,
 } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { AnimatedPressable } from "../../components/AnimatedPressable";
@@ -31,6 +32,25 @@ import { PromptModal } from "../../components/PromptModal";
 import { GapWarningBanner } from "../../components/GapWarningBanner";
 import { StatsSheet } from "../../components/StatsSheet";
 import { WallSizeSheet } from "../../components/WallSizeSheet";
+import { FurnitureGlyph } from "../../components/FurnitureGlyph";
+import { FurnitureSheet } from "../../components/FurnitureSheet";
+import { FurnitureEditSheet } from "../../components/FurnitureEditSheet";
+import {
+    catalogEntry,
+    cloneFurniture,
+    createFurniture,
+    footprintPx,
+    furnitureLayer,
+    hitTestFurniture,
+    normDeg,
+    pointInFurniture,
+    PX_PER_IN,
+    sortForDrawing,
+    toContent as furnitureToContent,
+    toLocal as furnitureToLocal,
+} from "../../utils/furnitureCatalog";
+import { formatLength } from "../../utils/units";
+import { clashMessage, computeClashes } from "../../utils/furnitureClash";
 import { usePinchPanZoom } from "../../hooks/usePinchPanZoom";
 import { useUnits } from "../../context/UnitsContext";
 import {
@@ -47,6 +67,13 @@ import {
 import { buildPlanHtml, buildShareText, computeStats } from "../../utils/planStats";
 import { useAuth } from "../../context/AuthContext";
 import { renameDesign, saveDesign, updateDesign } from "../../utils/designs";
+import { useEntitlements } from "../../context/EntitlementsContext";
+import { FloorSheet } from "../../components/FloorSheet";
+import { defaultFloorName, floorsFromParams, makeFloor, outerWallsOf } from "../../utils/floors";
+import { isStairs, stairVoidContent } from "../../utils/stairs";
+import { StairEditSheet } from "../../components/StairEditSheet";
+import { DesignSheet } from "../../components/DesignSheet";
+import { DEFAULT_FLOOR_FINISH, floorPattern2D, wallFinishOf } from "../../utils/finishes";
 import { report } from "../../utils/report";
 import { colors, radius } from "../../utils/theme";
 
@@ -67,6 +94,29 @@ const TAP_MOVE_THRESHOLD = 8; // screen-space movement below which a handle pres
 const MIN_OPENING_WIDTH = 18; // content-space minimum width when resizing a window/door
 const OPENING_END_MARGIN = 6; // screen-space keep-away from the wall's own ends when resizing
 const OPENING_MENU_WIDTH = 336;
+const FURNITURE_MENU_WIDTH = 320;
+const ROTATE_HANDLE_GAP = 40; // screen-space distance of the rotate knob behind a selected piece
+const RESIZE_HANDLE_SIZE = 10; // screen-space side of a resize handle square
+const RESIZE_HANDLE_HIT = 18; // screen-space grab radius of a resize handle
+const RESIZE_HANDLE_HIT_INSIDE = 9; // tighter radius when the touch is inside the piece (so small pieces stay movable)
+const MIN_FURNITURE_IN = 4; // smallest width/depth a piece can be dragged down to
+// Resize handles on the selected outline: corners resize both ways, edge
+// midpoints one way. (hx, hy) is the side in the piece's local frame.
+const RESIZE_HANDLES = [
+    [-1, -1],
+    [0, -1],
+    [1, -1],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+    [-1, 1],
+    [-1, 0],
+];
+// Pieces whose width and depth stay equal when resized (matches the edit sheet).
+const ROUND_SHAPES = new Set(["roundTable", "roundRug", "stool"]);
+const ROTATE_SNAP_DEG = 15; // rotation snaps to multiples of this when within ROTATE_SNAP_TOL
+const ROTATE_SNAP_TOL = 5;
+const FURNITURE_COLOR = "#7C5CFA"; // selection outline for furniture
 
 const OPENING_DEFAULTS = {
     window: { width: 46 },
@@ -100,6 +150,13 @@ const DOOR_ACTIONS = [
     { key: "copy", icon: "copy-outline", label: "Copy" },
     { key: "rotate", icon: "reload-outline", label: "Rotate" },
     { key: "flip", icon: "swap-horizontal-outline", label: "Flip" },
+    { key: "delete", icon: "trash-outline", label: "Delete" },
+];
+
+const FURNITURE_ACTIONS = [
+    { key: "rotate", icon: "reload-outline", label: "Rotate" },
+    { key: "edit", icon: "options-outline", label: "Edit" },
+    { key: "copy", icon: "copy-outline", label: "Copy" },
     { key: "delete", icon: "trash-outline", label: "Delete" },
 ];
 
@@ -213,16 +270,38 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     const [moreMenuVisible, setMoreMenuVisible] = useState(false);
     const [shareMenuVisible, setShareMenuVisible] = useState(false);
     const [statsVisible, setStatsVisible] = useState(false);
+    // Placed furniture: { id, type, x, y, rot, w, d, h, elev, color } — see
+    // utils/furnitureCatalog.js. Positions share the walls' content space.
+    const [furniture, setFurniture] = useState(route.params?.furniture ?? []);
+    const [selectedFurniture, setSelectedFurniture] = useState(null); // piece id | null
+    const [furnitureSheetVisible, setFurnitureSheetVisible] = useState(false);
+    const [furnitureEditVisible, setFurnitureEditVisible] = useState(false);
+    const [clashWarningVisible, setClashWarningVisible] = useState(false);
     const { units } = useUnits();
+    const { pro } = useEntitlements();
+    // Multi-floor: `floors` holds every floor; the one being edited lives in
+    // the `walls`/`furniture` state above (its entry in `floors` is synced on
+    // floor switch / save / navigation via syncedFloors()).
+    const [floors, setFloors] = useState(() => floorsFromParams(route.params));
+    const [floorIndex, setFloorIndex] = useState(() =>
+        Math.min(route.params?.floorIndex ?? 0, floorsFromParams(route.params).length - 1)
+    );
+    const [floorSheetVisible, setFloorSheetVisible] = useState(false);
+    const [stairEditVisible, setStairEditVisible] = useState(false);
+    const [designSheet, setDesignSheet] = useState(null); // null | "floor" | "walls" (opening tab)
+    const [renamingFloor, setRenamingFloor] = useState(null); // floor index | null
     const svgRef = useRef(null);
 
-    // Undo/redo history for wall edits. `wallsRef` always holds the latest
-    // committed walls so snapshots taken inside event handlers are current.
+    // Undo/redo history for wall + furniture edits. `wallsRef`/`furnitureRef`
+    // always hold the latest committed state so snapshots taken inside event
+    // handlers are current. History entries are { walls, furniture }.
     const wallsRef = useRef(walls);
     wallsRef.current = walls;
+    const furnitureRef = useRef(furniture);
+    furnitureRef.current = furniture;
     const undoStack = useRef([]);
     const redoStack = useRef([]);
-    const pendingSnapRef = useRef(null); // pre-drag walls, committed only if the drag actually edits
+    const pendingSnapRef = useRef(null); // pre-drag state, committed only if the drag actually edits
     const [, forceHist] = useState(0);
     const bumpHist = () => forceHist((n) => n + 1);
 
@@ -235,8 +314,19 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         bumpHist();
     };
 
-    // Snapshot the current walls before a discrete (non-drag) mutation.
-    const snapshot = () => pushUndo(wallsRef.current);
+    const currentState = () => ({
+        walls: wallsRef.current,
+        furniture: furnitureRef.current,
+    });
+    const restoreState = (st) => {
+        wallsRef.current = st.walls;
+        furnitureRef.current = st.furniture;
+        setWalls(st.walls);
+        setFurniture(st.furniture);
+    };
+
+    // Snapshot the current state before a discrete (non-drag) mutation.
+    const snapshot = () => pushUndo(currentState());
 
     const clearSelectionState = () => {
         setSelectedWall(null);
@@ -245,24 +335,23 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         setAddMenuVisible(false);
         setSplitMode(false);
         setAddOpeningKind(null);
+        setSelectedFurniture(null);
+        setFurnitureEditVisible(false);
+        setStairEditVisible(false);
     };
 
     const undo = () => {
         if (undoStack.current.length === 0) return;
-        redoStack.current.push(wallsRef.current);
-        const prev = undoStack.current.pop();
-        wallsRef.current = prev;
-        setWalls(prev);
+        redoStack.current.push(currentState());
+        restoreState(undoStack.current.pop());
         clearSelectionState();
         bumpHist();
     };
 
     const redo = () => {
         if (redoStack.current.length === 0) return;
-        undoStack.current.push(wallsRef.current);
-        const next = redoStack.current.pop();
-        wallsRef.current = next;
-        setWalls(next);
+        undoStack.current.push(currentState());
+        restoreState(redoStack.current.pop());
         clearSelectionState();
         bumpHist();
     };
@@ -321,7 +410,18 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             if (key === "copy") {
                 const file = new File(Paths.document, `floorplan-copy-${Date.now()}.json`);
                 file.create();
-                file.write(JSON.stringify({ walls, savedAt: new Date().toISOString() }, null, 2));
+                file.write(
+                    JSON.stringify(
+                        {
+                            walls,
+                            furniture,
+                            floors: syncedFloors(),
+                            savedAt: new Date().toISOString(),
+                        },
+                        null,
+                        2
+                    )
+                );
                 Alert.alert("Saved a Copy", "A copy of this plan was saved to your device.");
                 return;
             }
@@ -355,8 +455,9 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             next.splice(
                 selectedWall,
                 1,
-                { x1: a.x, y1: a.y, x2: mid.x, y2: mid.y },
-                { x1: mid.x, y1: mid.y, x2: b.x, y2: b.y }
+                // Both halves keep the wall's finish.
+                { x1: a.x, y1: a.y, x2: mid.x, y2: mid.y, ...(w.finish ? { finish: w.finish } : {}) },
+                { x1: mid.x, y1: mid.y, x2: b.x, y2: b.y, ...(w.finish ? { finish: w.finish } : {}) }
             );
             return next;
         });
@@ -410,10 +511,32 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             return;
         }
         const hit = hitTestWall(walls, contentPoint, HIT_RADIUS / transform.s);
+        // A tap that misses every wall may land on a rug (rugs aren't grabbed
+        // by hitTestHandle until selected).
+        const rug =
+            hit === null ? hitTestFurniture(furniture, contentPoint, 2 / transform.s) : null;
         setSelectedWall(hit);
         setSelectedOpening(null);
+        setSelectedFurniture(rug ? rug.id : null);
         setAddMenuVisible(false);
         setMoreMenuVisible(false);
+    };
+
+    const selectedPiece = selectedFurniture
+        ? furniture.find((f) => f.id === selectedFurniture) ?? null
+        : null;
+
+    // Content-space position of a piece's rotate knob: a constant screen
+    // distance behind its back edge, so it stays grabbable at any zoom.
+    // Content-space position of a resize handle on a piece's outline.
+    const resizeHandlePos = (f, hx, hy) => {
+        const { w, d } = footprintPx(f);
+        return furnitureToContent(f, { x: (hx * w) / 2, y: (hy * d) / 2 });
+    };
+
+    const rotateKnobPos = (f) => {
+        const { d } = footprintPx(f);
+        return furnitureToContent(f, { x: 0, y: -d / 2 - ROTATE_HANDLE_GAP / transform.s });
     };
 
     // Any window/door is directly grabbable/tappable regardless of whether
@@ -443,6 +566,46 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             return null;
         }
 
+        // The selected piece's rotate knob, then the piece itself (so a piece
+        // sitting on a rug stays grabbable once selected).
+        if (selectedPiece) {
+            const knob = rotateKnobPos(selectedPiece);
+            if (Math.hypot(contentPoint.x - knob.x, contentPoint.y - knob.y) <= r) {
+                return { kind: "furnitureRotate", id: selectedPiece.id };
+            }
+            // Resize handles: the nearest one within reach. A touch inside the
+            // piece needs to be right on a handle, so small pieces can still
+            // be dragged around by their body.
+            const inside = pointInFurniture(selectedPiece, contentPoint, -4 / transform.s);
+            const reach =
+                (inside ? RESIZE_HANDLE_HIT_INSIDE : RESIZE_HANDLE_HIT) / transform.s;
+            let best = null;
+            for (const [hx, hy] of RESIZE_HANDLES) {
+                const hp = resizeHandlePos(selectedPiece, hx, hy);
+                const dist = Math.hypot(contentPoint.x - hp.x, contentPoint.y - hp.y);
+                if (dist <= reach && (!best || dist < best.dist)) best = { hx, hy, dist };
+            }
+            if (best) {
+                return {
+                    kind: "furnitureResize",
+                    id: selectedPiece.id,
+                    hx: best.hx,
+                    hy: best.hy,
+                    start: { ...selectedPiece },
+                };
+            }
+            if (pointInFurniture(selectedPiece, contentPoint, 2 / transform.s)) {
+                return {
+                    kind: "furniture",
+                    id: selectedPiece.id,
+                    offset: {
+                        x: selectedPiece.x - contentPoint.x,
+                        y: selectedPiece.y - contentPoint.y,
+                    },
+                };
+            }
+        }
+
         for (let wi = 0; wi < walls.length; wi++) {
             const w = walls[wi];
             if (!w.openings) continue;
@@ -456,22 +619,105 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             }
         }
 
-        if (selectedWall === null) return null;
-        const w = walls[selectedWall];
-        if (!w) return null;
-
-        let anchor = null;
-        if (Math.hypot(contentPoint.x - w.x1, contentPoint.y - w.y1) <= r) {
-            anchor = { x: w.x1, y: w.y1 };
-        } else if (Math.hypot(contentPoint.x - w.x2, contentPoint.y - w.y2) <= r) {
-            anchor = { x: w.x2, y: w.y2 };
+        const w = selectedWall !== null ? walls[selectedWall] : null;
+        if (w) {
+            let anchor = null;
+            if (Math.hypot(contentPoint.x - w.x1, contentPoint.y - w.y1) <= r) {
+                anchor = { x: w.x1, y: w.y1 };
+            } else if (Math.hypot(contentPoint.x - w.x2, contentPoint.y - w.y2) <= r) {
+                anchor = { x: w.x2, y: w.y2 };
+            }
+            if (anchor) return findCornerGroup(walls, anchor);
         }
-        if (!anchor) return null;
-        return findCornerGroup(walls, anchor);
+
+        // Any piece of furniture: press-and-drag moves it, a tap selects it.
+        // Rugs are skipped until selected so a big rug doesn't swallow
+        // one-finger panning (tapping one still selects it, via onTap).
+        const piece = hitTestFurniture(
+            furniture.filter((f) => furnitureLayer(f) > 0),
+            contentPoint,
+            2 / transform.s
+        );
+        if (piece) {
+            return {
+                kind: "furniture",
+                id: piece.id,
+                offset: { x: piece.x - contentPoint.x, y: piece.y - contentPoint.y },
+            };
+        }
+        return null;
     };
 
     const handleDragMove = (target, contentPoint) => {
         if (!target) return;
+
+        if (target.kind === "furniture") {
+            setFurniture((fs) =>
+                fs.map((f) =>
+                    f.id === target.id
+                        ? {
+                              ...f,
+                              x: contentPoint.x + target.offset.x,
+                              y: contentPoint.y + target.offset.y,
+                          }
+                        : f
+                )
+            );
+            return;
+        }
+
+        if (target.kind === "furnitureResize") {
+            // Work in the piece's local frame as it was when the drag began,
+            // keeping the opposite side(s) fixed so it grows where you pull.
+            const f0 = target.start;
+            const { hx, hy } = target;
+            const round =
+                ROUND_SHAPES.has(catalogEntry(f0.type).shape) || f0.stair?.type === "spiral";
+            const l = furnitureToLocal(f0, contentPoint);
+            const { w: W0, d: D0 } = footprintPx(f0);
+            const minPx = MIN_FURNITURE_IN * PX_PER_IN;
+            let wIn = f0.w;
+            let dIn = f0.d;
+            if (hx) wIn = Math.round(Math.max(minPx, hx * l.x + W0 / 2) / PX_PER_IN);
+            if (hy) dIn = Math.round(Math.max(minPx, hy * l.y + D0 / 2) / PX_PER_IN);
+            if (round) {
+                const v = hx && hy ? Math.max(wIn, dIn) : hx ? wIn : dIn;
+                wIn = v;
+                dIn = v;
+            }
+            const W = wIn * PX_PER_IN;
+            const D = dIn * PX_PER_IN;
+            const center = furnitureToContent(f0, {
+                x: hx ? (hx * (W - W0)) / 2 : 0,
+                y: hy ? (hy * (D - D0)) / 2 : 0,
+            });
+            setFurniture((fs) =>
+                fs.map((f) =>
+                    f.id === target.id
+                        ? { ...f, w: wIn, d: dIn, x: center.x, y: center.y }
+                        : f
+                )
+            );
+            return;
+        }
+
+        if (target.kind === "furnitureRotate") {
+            setFurniture((fs) =>
+                fs.map((f) => {
+                    if (f.id !== target.id) return f;
+                    // The knob sits on the piece's local -y axis, i.e. at
+                    // (rot - 90°) on screen — so the drag angle + 90° is rot.
+                    let deg =
+                        (Math.atan2(contentPoint.y - f.y, contentPoint.x - f.x) * 180) /
+                            Math.PI +
+                        90;
+                    const snapped = Math.round(deg / ROTATE_SNAP_DEG) * ROTATE_SNAP_DEG;
+                    deg = Math.abs(deg - snapped) <= ROTATE_SNAP_TOL ? snapped : Math.round(deg);
+                    return { ...f, rot: normDeg(deg) };
+                })
+            );
+            return;
+        }
 
         if (target.kind === "openingEnd") {
             setWalls((ws) =>
@@ -561,23 +807,34 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     // it — select it (opening its own context menu) rather than treating the
     // negligible movement as a drag. Also selects its parent wall so it
     // highlights, even if the wall wasn't already selected.
-    // Remember the pre-drag walls so a genuine drag can be recorded as one undo
+    // Remember the pre-drag state so a genuine drag can be recorded as one undo
     // step (and a tap that merely nudged a handle can be rolled back).
     const handleDragStart = () => {
-        pendingSnapRef.current = wallsRef.current;
+        pendingSnapRef.current = currentState();
     };
 
     const handleDragEnd = (target, _contentPoint, gs) => {
         const pre = pendingSnapRef.current;
         pendingSnapRef.current = null;
-        const changed = pre !== null && wallsRef.current !== pre;
+        const changed =
+            pre !== null &&
+            (wallsRef.current !== pre.walls || furnitureRef.current !== pre.furniture);
         const isTap = gs && Math.hypot(gs.dx, gs.dy) < TAP_MOVE_THRESHOLD;
 
         if (changed && !isTap) {
             pushUndo(pre); // genuine drag → one undo point at the pre-drag state
         } else if (changed && isTap) {
-            wallsRef.current = pre; // barely-moved handle press → undo the nudge
-            setWalls(pre);
+            restoreState(pre); // barely-moved handle press → undo the nudge
+        }
+
+        // Touching a piece (tap or drag) selects it and shows its menu.
+        if (target?.kind === "furniture") {
+            setSelectedFurniture(target.id);
+            setSelectedWall(null);
+            setSelectedOpening(null);
+            setResizingOpening(null);
+            setAddMenuVisible(false);
+            return;
         }
 
         if (
@@ -590,6 +847,7 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 wallIndex: target.wallIndex,
                 openingIndex: target.openingIndex,
             });
+            setSelectedFurniture(null);
             setAddMenuVisible(false);
         }
     };
@@ -644,6 +902,10 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
     // While warning about a gap, mark the loose wall ends so the user can see
     // exactly where the room is open. Updates live as they drag ends together.
     const gapEnds = warningVisible && hasGap ? openEndpoints(walls) : [];
+    // Furniture clashing with other furniture, walls or doors — outlined in
+    // red live, and (like a gap) blocks switching to 3D until resolved.
+    const clashes = computeClashes(walls, furniture, stairVoids);
+    const hasClash = clashes.ids.size > 0;
 
     const selected = selectedWall !== null ? walls[selectedWall] : null;
     const menuPos =
@@ -812,6 +1074,101 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         );
     };
 
+    // --- Furniture -------------------------------------------------------
+
+    // Drop a new piece at the center of what's currently on screen and select it.
+    const addFurniture = (type) => {
+        setFurnitureSheetVisible(false);
+        const cx = canvas.w ? (canvas.w / 2 - transform.tx) / transform.s : 0;
+        const cy = canvas.h ? (canvas.h / 2 - transform.ty) / transform.s : 0;
+        const piece = createFurniture(type, cx, cy);
+        // Stairs rise exactly one floor.
+        if (isStairs(piece)) piece.h = floors[floorIndex]?.heightIn ?? piece.h;
+        snapshot();
+        setFurniture((fs) => [...fs, piece]);
+        setSelectedWall(null);
+        setSelectedOpening(null);
+        setResizingOpening(null);
+        setAddMenuVisible(false);
+        setSelectedFurniture(piece.id);
+    };
+
+    const updateSelectedFurniture = (patch) => {
+        if (!selectedFurniture) return;
+        snapshot();
+        setFurniture((fs) =>
+            fs.map((f) => (f.id === selectedFurniture ? { ...f, ...patch } : f))
+        );
+    };
+
+    const rotateSelectedFurniture = () => {
+        if (!selectedPiece) return;
+        // Step to the next quarter turn (so an odd angle squares back up).
+        const next = (Math.floor(normDeg(selectedPiece.rot || 0) / 90) + 1) * 90;
+        updateSelectedFurniture({ rot: normDeg(next) });
+    };
+
+    const copySelectedFurniture = () => {
+        if (!selectedPiece) return;
+        const copy = cloneFurniture(selectedPiece);
+        snapshot();
+        setFurniture((fs) => [...fs, copy]);
+        setSelectedFurniture(copy.id);
+    };
+
+    const deleteSelectedFurniture = () => {
+        if (!selectedFurniture) return;
+        snapshot();
+        setFurniture((fs) => fs.filter((f) => f.id !== selectedFurniture));
+        setSelectedFurniture(null);
+        setFurnitureEditVisible(false);
+    };
+
+    const handleFurnitureAction = (key) => {
+        if (key === "rotate") rotateSelectedFurniture();
+        else if (key === "edit") {
+            if (isStairs(selectedPiece)) setStairEditVisible(true);
+            else setFurnitureEditVisible(true);
+        }
+        else if (key === "copy") copySelectedFurniture();
+        else if (key === "delete") deleteSelectedFurniture();
+    };
+
+    const furnitureMenuPos =
+        selectedPiece && canvas.w
+            ? (() => {
+                  // Anchor above the piece's topmost on-screen point.
+                  const { w, d } = footprintPx(selectedPiece);
+                  const corners = [
+                      { x: -w / 2, y: -d / 2 },
+                      { x: w / 2, y: -d / 2 },
+                      { x: w / 2, y: d / 2 },
+                      { x: -w / 2, y: d / 2 },
+                  ].map((p) => furnitureToContent(selectedPiece, p));
+                  const minY = Math.min(...corners.map((p) => p.y));
+                  const maxY = Math.max(...corners.map((p) => p.y));
+                  const screenX = transform.tx + selectedPiece.x * transform.s;
+                  const topY = transform.ty + minY * transform.s;
+                  const botY = transform.ty + maxY * transform.s;
+
+                  // Leave room above for the rotate knob; flip below if needed.
+                  const GAP = 16 + ROTATE_HANDLE_GAP;
+                  let top = topY - MENU_HEIGHT - GAP;
+                  if (top < 12) top = botY + 28;
+
+                  return {
+                      left: Math.max(
+                          12,
+                          Math.min(
+                              screenX - FURNITURE_MENU_WIDTH / 2,
+                              canvas.w - FURNITURE_MENU_WIDTH - 12
+                          )
+                      ),
+                      top: Math.max(12, Math.min(top, canvas.h - MENU_HEIGHT - 12)),
+                  };
+              })()
+            : null;
+
     const deleteSelectedWall = () => {
         if (selectedWall === null) return;
         snapshot();
@@ -845,21 +1202,133 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
         );
     };
 
+    // --- Floors --------------------------------------------------------
+
+    // Every floor, with the one being edited updated from the live state.
+    const syncedFloors = () =>
+        floors.map((f, i) =>
+            i === floorIndex ? { ...f, walls: wallsRef.current, furniture: furnitureRef.current } : f
+        );
+
+    // Make floor `i` the one being edited. Undo history covers one floor at a
+    // time, so it's cleared on a switch.
+    const loadFloor = (fs, i) => {
+        setFloors(fs);
+        setFloorIndex(i);
+        wallsRef.current = fs[i].walls;
+        furnitureRef.current = fs[i].furniture;
+        setWalls(fs[i].walls);
+        setFurniture(fs[i].furniture);
+        clearSelectionState();
+        undoStack.current = [];
+        redoStack.current = [];
+        pendingSnapRef.current = null;
+        setWarningVisible(false);
+        setClashWarningVisible(false);
+        bumpHist();
+    };
+
+    const selectFloor = (i) => {
+        setFloorSheetVisible(false);
+        if (i === floorIndex) return;
+        loadFloor(syncedFloors(), i);
+    };
+
+    // Adding floors is a PRO feature. A new floor goes on top of the building
+    // and starts with the top floor's outer walls (or blank).
+    const addFloor = (blank) => {
+        if (!pro) {
+            setFloorSheetVisible(false);
+            navigation.navigate("Paywall");
+            return;
+        }
+        const fs = syncedFloors();
+        const top = fs[fs.length - 1];
+        const next = makeFloor(fs.length, blank ? [] : outerWallsOf(top.walls), []);
+        setFloorSheetVisible(false);
+        loadFloor([...fs, next], fs.length);
+    };
+
+    // Changing a floor's height also re-fits the stairs standing on it.
+    const setFloorHeight = (i, heightIn) => {
+        const fit = (list) => list.map((p) => (isStairs(p) ? { ...p, h: heightIn } : p));
+        setFloors((fs) =>
+            fs.map((f, j) =>
+                j === i
+                    ? { ...f, heightIn, furniture: j === floorIndex ? f.furniture : fit(f.furniture) }
+                    : f
+            )
+        );
+        if (i === floorIndex) setFurniture((list) => fit(list));
+    };
+
+    const applyFloorRename = (text) => {
+        const next = (text || "").trim();
+        const i = renamingFloor;
+        if (i === null || !next) return;
+        setFloors((fs) => fs.map((f, j) => (j === i ? { ...f, name: next } : f)));
+    };
+
+    const deleteFloor = (i) => {
+        if (floors.length <= 1) return;
+        Alert.alert(
+            "Delete floor",
+            `Delete "${floors[i].name}" and everything on it? This can't be undone.`,
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Delete",
+                    style: "destructive",
+                    onPress: () => {
+                        // Renumber floors that still carry a default name.
+                        const fs = syncedFloors()
+                            .filter((_, j) => j !== i)
+                            .map((f, j) =>
+                                /^(Ground floor|Floor \d+)$/.test(f.name)
+                                    ? { ...f, name: defaultFloorName(j) }
+                                    : f
+                            );
+                        setFloorSheetVisible(false);
+                        // Stay on the same floor if another was deleted below it,
+                        // otherwise land on the floor that took its place.
+                        const keep = i < floorIndex ? floorIndex - 1 : i === floorIndex ? Math.min(i, fs.length - 1) : floorIndex;
+                        loadFloor(fs, keep);
+                    },
+                },
+            ]
+        );
+    };
+
+    const floorBelow = floorIndex > 0 ? floors[floorIndex - 1] : null;
+    // Stairwell openings on this floor, made by stairs on the floor below.
+    const stairVoids = floorBelow
+        ? floorBelow.furniture.filter(isStairs).map((f) => stairVoidContent(f, PX_PER_IN))
+        : [];
+
     const handleSave = async () => {
         if (!user) {
             Alert.alert("Sign in required", "Please sign in to save your design.");
             return;
         }
-        if (walls.length === 0) {
+        const allFloors = syncedFloors();
+        if (allFloors.every((f) => f.walls.length === 0)) {
             Alert.alert("Nothing to save", "Draw some walls first.");
             return;
         }
+        // Floor 1 also goes in the legacy top-level fields (thumbnails, older
+        // app versions); every floor goes in `floors`.
+        const payload = {
+            walls: allFloors[0].walls,
+            furniture: allFloors[0].furniture,
+            floors: allFloors,
+            name,
+        };
         setSaving(true);
         try {
             if (savedId) {
-                await updateDesign(user.uid, savedId, { walls, name });
+                await updateDesign(user.uid, savedId, payload);
             } else {
-                const id = await saveDesign(user.uid, { walls, name });
+                const id = await saveDesign(user.uid, payload);
                 setSavedId(id);
             }
             Alert.alert("Saved", "Your design is in My Designs.");
@@ -898,6 +1367,34 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
             maxY: Math.max(...ys),
         });
     }
+    // The floor level's finish. Oak (the default) is drawn exactly as before
+    // with the planks above; other finishes use their own pattern.
+    const floorFinishKey = floors[floorIndex]?.floorFinish || DEFAULT_FLOOR_FINISH;
+    const floorPattern =
+        floorPolygon && floorFinishKey !== DEFAULT_FLOOR_FINISH
+            ? floorPattern2D(
+                  floorFinishKey,
+                  {
+                      minX: Math.min(...floorPolygon.map((p) => p.x)),
+                      maxX: Math.max(...floorPolygon.map((p) => p.x)),
+                      minY: Math.min(...floorPolygon.map((p) => p.y)),
+                      maxY: Math.max(...floorPolygon.map((p) => p.y)),
+                  },
+                  PX_PER_IN
+              )
+            : null;
+
+    // Apply the Design sheet: floor finish to this floor level, wall finish
+    // to the selected wall or to every wall (one undo step for walls).
+    const applyDesign = ({ floorFinish: ff, wallFinish: wf, allWalls }) => {
+        if (ff) setFloors((fs) => fs.map((f, i) => (i === floorIndex ? { ...f, floorFinish: ff } : f)));
+        if (wf) {
+            snapshot();
+            setWalls((ws) =>
+                ws.map((w, i) => (allWalls || i === selectedWall ? { ...w, finish: { ...wf } } : w))
+            );
+        }
+    };
 
     const imgRect = canvas.w
         ? {
@@ -1091,6 +1588,20 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 message="You need to complete your room to switch to 3D. The open ends are marked in red — drag them onto the neighbouring wall to close the gap."
             />
 
+            {/* Furniture clash warning (shown when 3D is blocked by a clash) */}
+            <GapWarningBanner
+                visible={
+                    clashWarningVisible &&
+                    hasClash &&
+                    !(warningVisible && hasGap) &&
+                    !splitMode &&
+                    !addOpeningKind &&
+                    !resizingOpening
+                }
+                onDismiss={() => setClashWarningVisible(false)}
+                message={hasClash ? clashMessage(clashes) : ""}
+            />
+
             {/* Split-mode instructions */}
             <GapWarningBanner
                 visible={splitMode}
@@ -1155,19 +1666,111 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                         {/* Wood floor clipped to the room's outer boundary */}
                         {floorPolygon && (
                             <G clipPath="url(#room)">
-                                <Polygon points={floorPoints} fill="#C4A981" />
-                                {planks.map((p, i) => (
-                                    <Rect
-                                        key={i}
-                                        x={p.x}
-                                        y={p.y}
-                                        width={p.w}
-                                        height={p.h}
-                                        fill={p.color}
-                                    />
-                                ))}
+                                {floorPattern ? (
+                                    <>
+                                        <Polygon points={floorPoints} fill={floorPattern.base} />
+                                        {floorPattern.rects.map((p, i) => (
+                                            <Rect
+                                                key={i}
+                                                x={p.x}
+                                                y={p.y}
+                                                width={p.w}
+                                                height={p.h}
+                                                fill={p.color}
+                                                transform={
+                                                    p.rot
+                                                        ? `rotate(${p.rot} ${p.x + p.w / 2} ${p.y + p.h / 2})`
+                                                        : undefined
+                                                }
+                                            />
+                                        ))}
+                                        {floorPattern.lines.map((l, i) => (
+                                            <Line
+                                                key={`fl${i}`}
+                                                x1={l.x1}
+                                                y1={l.y1}
+                                                x2={l.x2}
+                                                y2={l.y2}
+                                                stroke={floorPattern.lineColor}
+                                                strokeWidth={1}
+                                            />
+                                        ))}
+                                    </>
+                                ) : (
+                                    <>
+                                        <Polygon points={floorPoints} fill="#C4A981" />
+                                        {planks.map((p, i) => (
+                                            <Rect
+                                                key={i}
+                                                x={p.x}
+                                                y={p.y}
+                                                width={p.w}
+                                                height={p.h}
+                                                fill={p.color}
+                                            />
+                                        ))}
+                                    </>
+                                )}
                             </G>
                         )}
+
+                        {/* Faint outline of the floor below, for lining up walls */}
+                        {floorBelow &&
+                            floorBelow.walls.map((w, i) => (
+                                <Line
+                                    key={`below${i}`}
+                                    x1={w.x1}
+                                    y1={w.y1}
+                                    x2={w.x2}
+                                    y2={w.y2}
+                                    stroke="#94A3B8"
+                                    strokeWidth={2 / transform.s}
+                                    strokeDasharray={`${8 / transform.s} ${6 / transform.s}`}
+                                    strokeLinecap="round"
+                                    opacity={0.8}
+                                />
+                            ))}
+
+                        {/* Stairwell openings from the floor below */}
+                        {stairVoids.map((v, i) => {
+                            const cx = v.reduce((a, p) => a + p.x, 0) / v.length;
+                            const cy = v.reduce((a, p) => a + p.y, 0) / v.length;
+                            const pts = v.map((p) => `${p.x},${p.y}`).join(" ");
+                            return (
+                                <G key={`void${i}`}>
+                                    <Polygon
+                                        points={pts}
+                                        fill="#CBD5E1"
+                                        fillOpacity={0.55}
+                                        stroke="#64748B"
+                                        strokeWidth={1.5 / transform.s}
+                                        strokeDasharray={`${6 / transform.s} ${4 / transform.s}`}
+                                    />
+                                    <SvgText
+                                        x={cx}
+                                        y={cy}
+                                        fontSize={11 / transform.s}
+                                        fontWeight="700"
+                                        fill="#334155"
+                                        textAnchor="middle"
+                                    >
+                                        Open to below
+                                    </SvgText>
+                                </G>
+                            );
+                        })}
+
+                        {/* Furniture (under the walls, so pieces pushed
+                            against a wall tuck neatly beneath its line) */}
+                        {sortForDrawing(furniture).map((f) => (
+                            <G
+                                key={f.id}
+                                transform={`translate(${f.x} ${f.y}) rotate(${f.rot || 0})`}
+                                opacity={(f.elev ?? 0) > 0 ? 0.88 : 1}
+                            >
+                                <FurnitureGlyph item={f} sw={0.9} />
+                            </G>
+                        ))}
 
                         {/* Walls */}
                         {walls.map((w, i) => (
@@ -1344,6 +1947,135 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                 );
                             })()}
 
+                        {/* Clashing furniture: red outline */}
+                        {furniture
+                            .filter((f) => clashes.ids.has(f.id))
+                            .map((f) => {
+                                const { w, d } = footprintPx(f);
+                                const s = transform.s;
+                                return (
+                                    <G
+                                        key={`clash${f.id}`}
+                                        transform={`translate(${f.x} ${f.y}) rotate(${f.rot || 0})`}
+                                    >
+                                        <Rect
+                                            x={-w / 2 - 1.5 / s}
+                                            y={-d / 2 - 1.5 / s}
+                                            width={w + 3 / s}
+                                            height={d + 3 / s}
+                                            rx={2 / s}
+                                            fill={GAP_HIGHLIGHT}
+                                            fillOpacity={0.18}
+                                            stroke={GAP_HIGHLIGHT}
+                                            strokeWidth={2.5 / s}
+                                        />
+                                    </G>
+                                );
+                            })}
+
+                        {/* Selected furniture: outline, rotate knob, size label */}
+                        {selectedPiece &&
+                            (() => {
+                                const { w, d } = footprintPx(selectedPiece);
+                                const s = transform.s;
+                                const knobY = -d / 2 - ROTATE_HANDLE_GAP / s;
+                                const label = `${formatLength(selectedPiece.w, units)} × ${formatLength(
+                                    selectedPiece.d,
+                                    units
+                                )}`;
+                                // Below the piece whatever its rotation.
+                                const labelBelow = Math.hypot(w, d) / 2 + 16 / s;
+                                return (
+                                    <>
+                                        <G
+                                            transform={`translate(${selectedPiece.x} ${selectedPiece.y}) rotate(${
+                                                selectedPiece.rot || 0
+                                            })`}
+                                        >
+                                            <Rect
+                                                x={-w / 2 - 3 / s}
+                                                y={-d / 2 - 3 / s}
+                                                width={w + 6 / s}
+                                                height={d + 6 / s}
+                                                rx={3 / s}
+                                                fill={FURNITURE_COLOR}
+                                                fillOpacity={0.08}
+                                                stroke={FURNITURE_COLOR}
+                                                strokeWidth={2 / s}
+                                                strokeDasharray={`${6 / s} ${4 / s}`}
+                                            />
+                                            <Line
+                                                x1={0}
+                                                y1={-d / 2 - 3 / s}
+                                                x2={0}
+                                                y2={knobY}
+                                                stroke={FURNITURE_COLOR}
+                                                strokeWidth={1.5 / s}
+                                            />
+                                            <Circle
+                                                cx={0}
+                                                cy={knobY}
+                                                r={10 / s}
+                                                fill={colors.surface}
+                                                stroke={FURNITURE_COLOR}
+                                                strokeWidth={2.5 / s}
+                                            />
+                                            <Path
+                                                d={`M${-4.5 / s},${knobY - 1 / s} A${4.5 / s},${4.5 / s} 0 1 1 ${0},${knobY + 4.5 / s}`}
+                                                fill="none"
+                                                stroke={FURNITURE_COLOR}
+                                                strokeWidth={1.6 / s}
+                                                strokeLinecap="round"
+                                            />
+                                            {/* Resize handles */}
+                                            {RESIZE_HANDLES.map(([hx, hy]) => {
+                                                const hs = RESIZE_HANDLE_SIZE / s;
+                                                return (
+                                                    <Rect
+                                                        key={`rh${hx}${hy}`}
+                                                        x={hx * (w / 2 + 3 / s) - hs / 2}
+                                                        y={hy * (d / 2 + 3 / s) - hs / 2}
+                                                        width={hs}
+                                                        height={hs}
+                                                        rx={hx && hy ? 1.5 / s : hs / 2}
+                                                        fill={colors.surface}
+                                                        stroke={FURNITURE_COLOR}
+                                                        strokeWidth={2 / s}
+                                                    />
+                                                );
+                                            })}
+                                        </G>
+                                        {/* Size label: a white halo copy drawn first, then
+                                            the black text on top (react-native-svg ignores
+                                            paintOrder on iOS, so a single stroked text would
+                                            paint the halo over the letters). */}
+                                        <SvgText
+                                            x={selectedPiece.x}
+                                            y={selectedPiece.y + labelBelow}
+                                            fontSize={12 / s}
+                                            fontWeight="700"
+                                            fill={colors.surface}
+                                            stroke={colors.surface}
+                                            strokeWidth={3 / s}
+                                            strokeLinejoin="round"
+                                            textAnchor="middle"
+                                        >
+                                            {label}
+                                        </SvgText>
+                                        <SvgText
+                                            x={selectedPiece.x}
+                                            y={selectedPiece.y + labelBelow}
+                                            fontSize={12 / s}
+                                            fontWeight="700"
+                                            fill="#000000"
+                                            textAnchor="middle"
+                                        >
+                                            {label}
+                                        </SvgText>
+                                    </>
+                                );
+                            })()}
+
                         {/* Gap highlights: mark the loose wall ends causing the
                             open room, drawn last so they sit above everything. */}
                         {gapEnds.map((p, i) => (
@@ -1374,6 +2106,23 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                     </G>
                 </Svg>
 
+                {/* Floor switcher */}
+                <AnimatedPressable
+                    onPress={() => {
+                        setMoreMenuVisible(false);
+                        setShareMenuVisible(false);
+                        setFloorSheetVisible(true);
+                    }}
+                    scaleTo={0.95}
+                    style={styles.floorChip}
+                >
+                    <Ionicons name="layers-outline" size={16} color={colors.text} />
+                    <Text style={styles.floorChipText} numberOfLines={1}>
+                        {floors[floorIndex]?.name}
+                    </Text>
+                    <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
+                </AnimatedPressable>
+
                 {/* Selected-wall context menu (hidden while an opening is picked) */}
                 {menuPos && !selectedOpening && (
                     <View style={[styles.contextMenu, menuPos]}>
@@ -1390,6 +2139,23 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                                 setSizeSheetVisible(true);
                             }}
                         />
+                        <View>
+                            <ContextItem
+                                icon="brush-outline"
+                                label="Style"
+                                onPress={() => {
+                                    setAddMenuVisible(false);
+                                    setDesignSheet("walls");
+                                }}
+                            />
+                            {/* the wall's current color */}
+                            <View
+                                style={[
+                                    styles.wallColorDot,
+                                    { backgroundColor: wallFinishOf(selected).color },
+                                ]}
+                            />
+                        </View>
                         <ContextItem
                             icon="trash-outline"
                             label="Delete"
@@ -1457,6 +2223,22 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                         ))}
                     </View>
                 )}
+
+                {/* Selected-furniture context menu */}
+                {furnitureMenuPos && (
+                    <View
+                        style={[styles.contextMenu, styles.furnitureMenu, furnitureMenuPos]}
+                    >
+                        {FURNITURE_ACTIONS.map((action) => (
+                            <ContextItem
+                                key={action.key}
+                                icon={action.icon}
+                                label={action.label}
+                                onPress={() => handleFurnitureAction(action.key)}
+                            />
+                        ))}
+                    </View>
+                )}
             </View>
 
             {/* Toolbar */}
@@ -1465,7 +2247,15 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                     onPress={() =>
                         hasGap
                             ? setWarningVisible(true)
-                            : navigation.navigate("Room3D", { walls })
+                            : hasClash
+                            ? setClashWarningVisible(true)
+                            : navigation.navigate("Room3D", {
+                                  walls,
+                                  furniture,
+                                  name,
+                                  floors: syncedFloors(),
+                                  floorIndex,
+                              })
                     }
                     scaleTo={0.9}
                     style={styles.tool}
@@ -1489,9 +2279,42 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 </AnimatedPressable>
 
                 <AnimatedPressable
+                    onPress={() => {
+                        setMoreMenuVisible(false);
+                        setShareMenuVisible(false);
+                        setFurnitureSheetVisible(true);
+                    }}
+                    scaleTo={0.9}
+                    style={styles.tool}
+                >
+                    <MaterialCommunityIcons name="sofa-outline" size={27} color={colors.text} />
+                    <Text style={styles.toolLabel}>Furniture</Text>
+                </AnimatedPressable>
+
+                <AnimatedPressable
+                    onPress={() => {
+                        setMoreMenuVisible(false);
+                        setShareMenuVisible(false);
+                        setDesignSheet(selected ? "walls" : "floor");
+                    }}
+                    scaleTo={0.9}
+                    style={styles.tool}
+                >
+                    <Ionicons name="brush-outline" size={25} color={colors.text} />
+                    <Text style={styles.toolLabel}>Style</Text>
+                </AnimatedPressable>
+
+                <AnimatedPressable
                     onPress={() =>
                         navigation.navigate("DrawWalls", {
                             updatedWalls: walls,
+                            // Carried through wall drawing and handed back on
+                            // "Done" so placed furniture isn't lost.
+                            furniture,
+                            // Likewise the other floors, so drawing walls on
+                            // one floor keeps the rest of the building.
+                            floors: syncedFloors(),
+                            floorIndex,
                             imageUri,
                         })
                     }
@@ -1509,6 +2332,67 @@ export const PlanPreviewScreen = ({ navigation, route }) => {
                 pixelsPerFoot={PIXELS_PER_FOOT}
                 onClose={() => setSizeSheetVisible(false)}
                 onApply={applyWallSize}
+            />
+
+            <FloorSheet
+                visible={floorSheetVisible}
+                floors={floors.map((f, i) =>
+                    i === floorIndex ? { ...f, walls, furniture } : f
+                )}
+                activeIndex={floorIndex}
+                pro={pro}
+                onSelect={selectFloor}
+                onAdd={addFloor}
+                onRename={(i) => setRenamingFloor(i)}
+                onHeight={setFloorHeight}
+                onDelete={deleteFloor}
+                onClose={() => setFloorSheetVisible(false)}
+            />
+            <PromptModal
+                visible={renamingFloor !== null}
+                title="Rename floor"
+                message="Enter a name for this floor."
+                placeholder="Floor name"
+                initialValue={renamingFloor !== null ? floors[renamingFloor]?.name ?? "" : ""}
+                confirmLabel="Save"
+                onSubmit={applyFloorRename}
+                onClose={() => setRenamingFloor(null)}
+            />
+
+            <FurnitureSheet
+                visible={furnitureSheetVisible}
+                onPick={addFurniture}
+                onClose={() => setFurnitureSheetVisible(false)}
+            />
+
+            <DesignSheet
+                visible={designSheet !== null}
+                initialTab={designSheet || "floor"}
+                floorName={floors[floorIndex]?.name}
+                floorFinishKey={floorFinishKey}
+                wallFinish={wallFinishOf(selected ?? walls[0])}
+                hasSelectedWall={selected !== null}
+                pro={pro}
+                onApply={applyDesign}
+                onProBlocked={() => {
+                    setDesignSheet(null);
+                    navigation.navigate("Paywall");
+                }}
+                onClose={() => setDesignSheet(null)}
+            />
+
+            <StairEditSheet
+                visible={stairEditVisible && isStairs(selectedPiece)}
+                item={selectedPiece}
+                onApply={updateSelectedFurniture}
+                onClose={() => setStairEditVisible(false)}
+            />
+
+            <FurnitureEditSheet
+                visible={furnitureEditVisible && !!selectedPiece}
+                item={selectedPiece}
+                onApply={updateSelectedFurniture}
+                onClose={() => setFurnitureEditVisible(false)}
             />
 
             <StatsSheet
@@ -1606,6 +2490,33 @@ const styles = StyleSheet.create({
     openingMenu: {
         width: OPENING_MENU_WIDTH,
     },
+    furnitureMenu: {
+        width: FURNITURE_MENU_WIDTH,
+    },
+    floorChip: {
+        position: "absolute",
+        top: 10,
+        left: 12,
+        maxWidth: 200,
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 6,
+        height: 34,
+        paddingHorizontal: 12,
+        borderRadius: radius.pill,
+        backgroundColor: colors.surface,
+        shadowColor: "#0F172A",
+        shadowOpacity: 0.12,
+        shadowRadius: 10,
+        shadowOffset: { width: 0, height: 4 },
+        elevation: 6,
+    },
+    floorChipText: {
+        flexShrink: 1,
+        fontSize: 13,
+        fontWeight: "700",
+        color: colors.text,
+    },
     contextLabel: {
         fontSize: 12,
         fontWeight: "600",
@@ -1690,13 +2601,23 @@ const styles = StyleSheet.create({
         flexDirection: "row",
         alignItems: "flex-end",
         justifyContent: "space-between",
-        paddingHorizontal: 24,
+        paddingHorizontal: 14,
         paddingBottom: 30,
         paddingTop: 8,
     },
     tool: {
         alignItems: "center",
-        minWidth: 64,
+        minWidth: 58,
+    },
+    wallColorDot: {
+        position: "absolute",
+        top: -2,
+        right: 2,
+        width: 11,
+        height: 11,
+        borderRadius: 6,
+        borderWidth: 1.5,
+        borderColor: colors.surface,
     },
     threeD: {
         fontSize: 24,

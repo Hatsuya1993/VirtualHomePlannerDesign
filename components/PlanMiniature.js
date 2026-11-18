@@ -1,9 +1,10 @@
 import Svg, { Line, Polygon } from "react-native-svg";
+import { footprintCorners, shade, sortForDrawing } from "../utils/furnitureCatalog";
 import { roomOutline } from "../utils/roomGeometry";
 
 // A small thumbnail of a saved plan, rendered from its walls. Uses a viewBox so
 // it scales to whatever box it's dropped in without pixel measurement.
-export const PlanMiniature = ({ walls, floor = "#EBDDC4", wall = "#4C7CA8" }) => {
+export const PlanMiniature = ({ walls, furniture, floor = "#EBDDC4", wall = "#4C7CA8" }) => {
     if (!walls || walls.length === 0) return null;
 
     const xs = walls.flatMap((w) => [w.x1, w.x2]);
@@ -30,6 +31,17 @@ export const PlanMiniature = ({ walls, floor = "#EBDDC4", wall = "#4C7CA8" }) =>
             preserveAspectRatio="xMidYMid meet"
         >
             {floorPts ? <Polygon points={floorPts} fill={floor} /> : null}
+            {sortForDrawing(furniture ?? []).map((f) => (
+                <Polygon
+                    key={f.id}
+                    points={footprintCorners(f)
+                        .map((p) => `${p.x},${p.y}`)
+                        .join(" ")}
+                    fill={f.color}
+                    stroke={shade(f.color, -0.35)}
+                    strokeWidth={sw * 0.25}
+                />
+            ))}
             {walls.map((w, i) => (
                 <Line
                     key={i}
